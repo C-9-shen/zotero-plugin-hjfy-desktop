@@ -1,16 +1,25 @@
-# dot files
+# OS and editor files
 .DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
 
 # Node.js
-node_modules
+/node_modules/
 pnpm-lock.yaml
 yarn.lock
 
 # TSC
-tsconfig.tsbuildinfo
+*.tsbuildinfo
 
 # Scaffold
 .env
-.scaffold
-build
-logs
+.env.*
+!.env.example
+/.scaffold/
+/build/
+/logs/
+/output/
+*.log
+*.xpi

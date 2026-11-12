@@ -1,7 +1,10 @@
 .vscode
-build
-logs
-node_modules
+.scaffold/
+build/
+logs/
+node_modules/
+output/
+*.tsbuildinfo
 package-lock.json
 yarn.lock
 pnpm-lock.yaml

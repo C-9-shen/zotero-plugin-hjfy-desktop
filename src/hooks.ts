@@ -1,4 +1,10 @@
 import { ArxivTranslationFactory } from "./modules/arxivTranslation";
+import { DesktopTranslation } from "./modules/desktopTranslation";
+import {
+  LightweightTranslation,
+  configureLightweightKey,
+} from "./modules/lightweightTranslation";
+import { closeTranslationReaders } from "./modules/translationReader";
 import { getString, initLocale } from "./utils/locale";
 import { createZToolkit } from "./utils/ztoolkit";
 
@@ -10,6 +16,11 @@ async function onStartup() {
   ]);
 
   initLocale();
+  await Zotero.PreferencePanes.register({
+    pluginID: addon.data.config.addonID,
+    src: `${rootURI}content/preferences.xhtml`,
+    label: "幻觉翻译",
+  });
 
   await Promise.all(
     Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),
@@ -54,18 +65,23 @@ async function onMainWindowLoad(_win: _ZoteroTypes.MainWindow): Promise<void> {
 }
 
 async function onMainWindowUnload(_win: Window): Promise<void> {
+  closeTranslationReaders(_win);
   ztoolkit.unregisterAll();
 }
 
-function onShutdown(): void {
+async function onShutdown(): Promise<void> {
+  addon.data.alive = false;
+  closeTranslationReaders();
+  await DesktopTranslation.cancelAll();
+  await LightweightTranslation.cancelAll();
   ztoolkit.unregisterAll();
   // Remove addon object
-  addon.data.alive = false;
   // @ts-expect-error - Plugin instance is not typed
   delete Zotero[addon.data.config.addonInstance];
 }
 
 export default {
+  configureLightweightKey,
   onStartup,
   onShutdown,
   onMainWindowLoad,

@@ -1,8 +1,8 @@
 {
   "name": "zotero-plugin-hjfy",
   "type": "module",
-  "version": "0.1.5",
-  "description": "Zotero plugin for translating arXiv articles based on LaTeX source code using hjfy.top Translation",
+  "version": "0.3.3",
+  "description": "Translate arXiv LaTeX sources with a built-in lightweight API backend and portable TeX or the HJFY Desktop engine",
   "config": {
     "addonName": "幻觉翻译 arXiv 翻译",
     "addonID": "hjfy-arxiv@translator.com",
@@ -12,14 +12,18 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/angjustinl/zotero-plugin-hjfy.git"
+    "url": "git+https://github.com/C-9-shen/zotero-plugin-hjfy-desktop.git"
   },
-  "author": "angjustinl",
+  "author": "9_shen",
   "bugs": {
-    "url": "https://github.com/angjustinl/zotero-plugin-hjfy/issues"
+    "url": "https://github.com/C-9-shen/zotero-plugin-hjfy-desktop/issues"
   },
-  "homepage": "https://github.com/angjustinl/zotero-plugin-hjfy#readme",
+  "homepage": "https://github.com/C-9-shen/zotero-plugin-hjfy-desktop",
   "license": "AGPL-3.0-or-later",
+  "private": true,
+  "engines": {
+    "node": ">=22.8.0"
+  },
   "scripts": {
     "start": "zotero-plugin serve",
     "build": "zotero-plugin build && tsc --noEmit",
@@ -27,9 +31,12 @@
     "lint:fix": "prettier --write . && eslint . --fix",
     "release": "zotero-plugin release",
     "test": "zotero-plugin test",
-    "update-deps": "npm update --save"
+    "update-deps": "npm update --save",
+    "test:unit": "node --test test/unit/desktop.test.mjs test/unit/lightweight.test.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "zotero-plugin-toolkit": "^5.1.0-beta.13"
   },
   "devDependencies": {

@@ -1,0 +1,87 @@
+<vbox
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+>
+  <html:h2>幻觉翻译</html:h2>
+  <html:label for="hjfy-translation-backend">翻译方式</html:label>
+  <html:select
+    id="hjfy-translation-backend"
+    preference="extensions.zotero.hjfyarxiv.translation.backend"
+  >
+    <html:option value="desktop">幻觉翻译桌面端（默认）</html:option>
+    <html:option value="lightweight">精简实现＋便携 TeX（实验性）</html:option>
+  </html:select>
+  <html:p
+    >选择会自动保存，从下一次翻译任务生效，无需重启
+    Zotero。请在下方配置所选方式；已有译文仍直接打开分屏。</html:p
+  >
+  <html:h3>精简实现配置</html:h3>
+  <html:p
+    >不需要安装幻觉翻译桌面端。使用自己的模型 API；首次自动下载 Tectonic 和所需
+    TeX
+    资源，后续复用缓存。仅翻译正文、标题等文本，表格内容、公式、代码和参考文献保持原样。复杂模板可能无法编译。</html:p
+  >
+  <label value="API 基础地址（包含 /v1，例如 https://服务地址/v1）" />
+  <html:input
+    type="url"
+    preference="extensions.zotero.hjfyarxiv.lightweight.baseUrl"
+  />
+  <label value="模型名称" />
+  <html:input
+    type="text"
+    preference="extensions.zotero.hjfyarxiv.lightweight.model"
+  />
+  <label value="API 协议" />
+  <html:select preference="extensions.zotero.hjfyarxiv.lightweight.protocol">
+    <html:option value="chat-completions"
+      >Chat Completions 兼容接口</html:option
+    >
+    <html:option value="responses">Responses 兼容接口</html:option>
+  </html:select>
+  <button
+    label="设置或删除 API 密钥…"
+    oncommand="Zotero.HjfyArxiv.hooks.configureLightweightKey(window)"
+  />
+  <label value="Tectonic 程序路径（留空自动下载 Windows x64 版）" />
+  <html:input
+    type="text"
+    preference="extensions.zotero.hjfyarxiv.lightweight.tectonicPath"
+  />
+  <label
+    value="LaTeX 主文件相对路径（通常留空；多主文件时填写，如 main.tex）"
+  />
+  <html:input
+    type="text"
+    preference="extensions.zotero.hjfyarxiv.lightweight.mainFile"
+  />
+  <html:p
+    >轻量后端的密钥保存于 Zotero 密码管理器。翻译、TeX 资源缓存和诊断文件位于
+    Zotero 配置目录的
+    hjfy-lightweight。源文件的文字会发送给配置的模型服务，可能产生 API
+    费用。</html:p
+  >
+  <html:h3>幻觉翻译桌面端配置</html:h3>
+  <html:p
+    >先在幻觉翻译桌面端配置并启用模型。本插件读取该配置，调用本地 LaTeX
+    翻译引擎。模型服务可能收取 API 费用。</html:p
+  >
+  <label value="桌面端安装目录（留空自动检测商店安装）" />
+  <html:input
+    type="text"
+    preference="extensions.zotero.hjfyarxiv.desktop.installationDirectory"
+  />
+  <label value="桌面端数据目录（留空自动检测）" />
+  <html:input
+    type="text"
+    preference="extensions.zotero.hjfyarxiv.desktop.dataDirectory"
+  />
+  <label value="模型配置名称（留空使用第一个已启用模型）" />
+  <html:input
+    type="text"
+    preference="extensions.zotero.hjfyarxiv.desktop.modelName"
+  />
+  <html:p
+    >仅支持 Windows。LaTeX 翻译需要可用的 TeX 环境。任务日志保留在 Zotero
+    配置目录的 hjfy-desktop/tasks 中。</html:p
+  >
+</vbox>

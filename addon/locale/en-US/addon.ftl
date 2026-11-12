@@ -1,3 +1,3 @@
-startup-begin = hjfy.top arXiv Plugin is loading
-startup-finish = hjfy.top arXiv Plugin is ready
-menuitem-label = hjfy.top arXiv: Translate Current Article
+startup-begin = HJFY Desktop arXiv Plugin is loading
+startup-finish = HJFY Desktop arXiv Plugin is ready
+menuitem-label = HJFY arXiv: Translate Current Article
