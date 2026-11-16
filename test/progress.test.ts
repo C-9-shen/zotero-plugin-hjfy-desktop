@@ -8,6 +8,7 @@ describe("translation progress child notes", function () {
   let originalTranslate: typeof DesktopTranslation.translate;
 
   beforeEach(async function () {
+    (globalThis as any).addon = (Zotero as any).HjfyArxiv;
     originalTranslate = DesktopTranslation.translate;
     item = new Zotero.Item("preprint");
     item.setField("title", "Translation progress note test");
@@ -70,5 +71,27 @@ describe("translation progress child notes", function () {
       Zotero.Items.get(item.getNotes()[0]).getNote(),
       "幻觉翻译日志 · 失败",
     );
+  });
+
+  it("erases the successful progress note after import without recreating it on a timer", async function () {
+    const originalSave = ArxivTranslationFactory.savePdfAsAttachment;
+    DesktopTranslation.translate = async (_id, update, log) => {
+      assert.lengthOf(item.getNotes(), 1);
+      update("正文翻译 2/2");
+      log?.("编译完成");
+      return "test-output.pdf";
+    };
+    ArxivTranslationFactory.savePdfAsAttachment = async () => {
+      assert.lengthOf(item.getNotes(), 1);
+      return item;
+    };
+    try {
+      await ArxivTranslationFactory.translateSingleItem(item);
+      assert.lengthOf(item.getNotes(), 0);
+      await Zotero.Promise.delay(1200);
+      assert.lengthOf(item.getNotes(), 0);
+    } finally {
+      ArxivTranslationFactory.savePdfAsAttachment = originalSave;
+    }
   });
 });

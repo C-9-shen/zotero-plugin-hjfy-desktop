@@ -1,7 +1,7 @@
 {
   "name": "zotero-plugin-hjfy",
   "type": "module",
-  "version": "0.3.3",
+  "version": "0.3.8",
   "description": "Translate arXiv LaTeX sources with a built-in lightweight API backend and portable TeX or the HJFY Desktop engine",
   "config": {
     "addonName": "幻觉翻译 arXiv 翻译",

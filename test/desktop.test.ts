@@ -166,38 +166,17 @@ describe("desktop runtime without shell scripts", function () {
       assert.isTrue(await attachment.fileExists());
       assert.isTrue(messages.some((message) => message.includes("解压")));
       assert.isTrue(messages.some((message) => message.includes("任务已完成")));
-      assert.lengthOf(item.getNotes(), 1);
-      const progressNote = Zotero.Items.get(item.getNotes()[0]);
-      assert.equal(progressNote.parentID, item.id);
-      assert.include(progressNote.getNote(), "幻觉翻译日志 · 已完成");
-      assert.include(progressNote.getNote(), "诊断目录");
-      assert.include(progressNote.getNote(), "解压 LaTeX 源码");
-      const savedNote = progressNote.getNote();
+      assert.lengthOf(item.getNotes(), 0);
       const again = await ArxivTranslationFactory.translateSingleItem(item);
       assert.equal(again.id, attachment.id);
       assert.equal(launches, 1);
       assert.lengthOf(item.getAttachments(), 1);
-      assert.lengthOf(item.getNotes(), 1);
-      assert.equal(progressNote.getNote(), savedNote);
-      const taskDirs = await IOUtils.getChildren(
-        PathUtils.join(PathUtils.profileDir, "hjfy-desktop", "tasks"),
-      );
-      const job = taskDirs.sort().at(-1)!;
-      const resultPath = PathUtils.join(
-        job,
-        "translated",
-        "source_zh_Hans.pdf",
-      );
-      const finalEvent = await IOUtils.readJSON(
-        PathUtils.join(job, "result.json"),
-      );
-      assert.equal(finalEvent.result.translation.fallback_originals, 0);
-      assert.equal(finalEvent.result.translation.cache_hits, 184);
-      assert.isTrue(await IOUtils.exists(resultPath));
-      await IOUtils.copy(
-        resultPath,
-        PathUtils.join(PathUtils.tempDir, "hjfy-native-2610.34593v1.pdf"),
-      );
+      assert.lengthOf(item.getNotes(), 0);
+      const job = messages
+        .find((text) => text.startsWith("诊断目录："))!
+        .slice("诊断目录：".length);
+      assert.isFalse(await IOUtils.exists(job));
+      assert.isTrue(await attachment.fileExists());
       await IOUtils.writeJSON(
         PathUtils.join(PathUtils.profileDir, "hjfy-native-test-result.json"),
         { job, attachment: attachment.attachmentFilename, launches },

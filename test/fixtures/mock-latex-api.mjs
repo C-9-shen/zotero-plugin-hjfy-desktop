@@ -24,15 +24,20 @@ const server = http.createServer(async (request, response) => {
     response.writeHead(400).end();
     return;
   }
-  const text = body.messages[1].content;
-  const translated = text
-    .split(/(\[\[HJFY_\d+\]\])/)
-    .map((part) =>
-      part.startsWith("[[HJFY_")
-        ? part
-        : part.replace(/[a-zA-Z][a-zA-Z ,.!?:;'-]*/g, "中文测试"),
-    )
-    .join("");
+  const batch = JSON.parse(body.messages[1].content);
+  const translated = JSON.stringify({
+    segments: batch.segments.map(({ id, text }) => ({
+      id,
+      text: text
+        .split(/(\[\[HJFY_\d+\]\])/)
+        .map((part) =>
+          part.startsWith("[[HJFY_")
+            ? part
+            : part.replace(/[a-zA-Z][a-zA-Z ,.!?:;'-]*/g, "中文测试"),
+        )
+        .join(""),
+    })),
+  });
   calls++;
   response.setHeader("Content-Type", "application/json; charset=utf-8");
   response.end(

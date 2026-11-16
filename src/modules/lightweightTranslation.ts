@@ -8,6 +8,7 @@ import {
 } from "./latex/api";
 import { translateLatexProject } from "./latex/pipeline";
 import { ensurePortableTex } from "./latex/portableTex";
+import { TaskQueue } from "../utils/taskQueue";
 
 const KEY_ORIGIN = "chrome://hjfyarxiv";
 const KEY_REALM = "lightweight-api";
@@ -65,6 +66,15 @@ export class LightweightTranslation {
   private static generation = 0;
   private static requests = new Set<XMLHttpRequest>();
   private static processes = new Set<any>();
+  private static compilerQueue = new TaskQueue(1);
+  private static completed = new Map<string, string>();
+
+  static async cleanup(output: string) {
+    const job = this.completed.get(output);
+    if (!job) return;
+    await IOUtils.remove(job, { recursive: true, ignoreAbsent: true });
+    this.completed.delete(output);
+  }
 
   static async cancelAll() {
     this.generation++;
@@ -73,6 +83,19 @@ export class LightweightTranslation {
   }
 
   private static async runCompiler(
+    command: string,
+    args: string[],
+    workdir: string,
+    cache: string,
+    log: (text: string) => void,
+    check: () => void,
+  ) {
+    return this.compilerQueue.run(workdir, () =>
+      this.compile(command, args, workdir, cache, log, check),
+    );
+  }
+
+  private static async compile(
     command: string,
     args: string[],
     workdir: string,
@@ -213,6 +236,17 @@ export class LightweightTranslation {
             config.protocol,
             config.model,
           ]),
+          diagnostic: async (record) => {
+            const directory = PathUtils.join(job, "diagnostics");
+            await IOUtils.makeDirectory(directory, { ignoreExisting: true });
+            await IOUtils.writeJSON(
+              PathUtils.join(
+                directory,
+                `batch-${record.batch}-attempt-${record.attempt}.json`,
+              ),
+              record,
+            );
+          },
           translate: async (text, feedback) => {
             check();
             const request = modelRequest(config, text, feedback);
@@ -307,12 +341,14 @@ export class LightweightTranslation {
         main: result.main,
         requested: result.requested,
         cacheHits: result.cacheHits,
+        requests: result.requests,
         output,
         backend: "lightweight-v1",
       });
       log(
-        `翻译 ${result.requested} 段，缓存 ${result.cacheHits} 段；译文源码保存在 ${project}`,
+        `翻译 ${result.requested} 段，缓存 ${result.cacheHits} 段，批量请求 ${result.requests} 次；译文源码保存在 ${project}`,
       );
+      this.completed.set(output, job);
       return output;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

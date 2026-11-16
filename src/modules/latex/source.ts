@@ -13,13 +13,23 @@ export class LatexMarkerError extends Error {
 }
 
 // Keep texttt opaque: filenames, dataset keys and code must remain verbatim.
-const TEXT_COMMANDS = new Set(
-  "title subtitle section subsection subsubsection paragraph subparagraph chapter part caption subcaption footnote textbf textit emph textrm textsf textnormal underline abstract keywords thanks".split(
+const BLOCK_TEXT_COMMANDS = new Set(
+  "title subtitle section subsection subsubsection paragraph subparagraph chapter part caption subcaption abstract keywords".split(
+    " ",
+  ),
+);
+const INLINE_TEXT_COMMANDS = new Set(
+  "footnote thanks textbf textit emph textrm textsf textnormal textup textsl textsc underline".split(
     " ",
   ),
 );
 const OPAQUE_ENVIRONMENTS = new Set(
   "equation equation* align align* aligned gather gather* multline multline* displaymath math eqnarray eqnarray* verbatim verbatim* Verbatim lstlisting minted tikzpicture picture tabular tabular* tabularx array thebibliography filecontents filecontents* comment".split(
+    " ",
+  ),
+);
+const INTEGER_PARAMETERS = new Set(
+  "looseness tolerance pretolerance hbadness vbadness linepenalty hyphenpenalty exhyphenpenalty clubpenalty widowpenalty displaywidowpenalty brokenpenalty interlinepenalty hangafter".split(
     " ",
   ),
 );
@@ -129,7 +139,7 @@ export function planLatex(
     prose = "";
     protectedParts = [];
   };
-  const scan = (from: number, to: number, active: boolean) => {
+  const scan = (from: number, to: number, active: boolean, inline = false) => {
     for (let i = from; i < to; ) {
       const char = source[i];
       if (char === "%") {
@@ -138,10 +148,11 @@ export function planLatex(
         protect(source.slice(i, end));
         i = end;
       } else if (/^\r?\n[\t ]*\r?\n/.test(source.slice(i))) {
-        flush(i);
         const blank = /^\r?\n[\t ]*\r?\n/.exec(source.slice(i))![0];
+        if (inline) protect(blank);
+        else flush(i);
         i += blank.length;
-        start = i;
+        if (!inline) start = i;
       } else if (
         char === "$" ||
         source.startsWith("\\(", i) ||
@@ -162,7 +173,10 @@ export function planLatex(
         }
         if (end >= to) throw new Error("LaTeX 公式未闭合。");
         end += close.length;
+        const block = !inline && (delimiter === "$$" || delimiter === "\\[");
+        if (block) flush(i);
         protect(source.slice(i, end));
+        if (block) flush(end);
         i = end;
       } else if (char === "\\") {
         const command = commandAt(source, i);
@@ -172,7 +186,10 @@ export function planLatex(
           continue;
         }
         let end = command.end;
-        if (["def", "gdef", "edef", "xdef"].includes(command.name)) {
+        if (INTEGER_PARAMETERS.has(command.name)) {
+          const assignment = /^\s*=?\s*[+-]?\d+/.exec(source.slice(end));
+          if (assignment) end += assignment[0].length;
+        } else if (["def", "gdef", "edef", "xdef"].includes(command.name)) {
           const opening = source.indexOf("{", end);
           if (opening < 0) throw new Error("LaTeX 宏定义不完整。");
           end = groupEnd(source, opening);
@@ -188,9 +205,17 @@ export function planLatex(
           end = close + 1;
         } else {
           const groups: { start: number; end: number; open: string }[] = [];
+          const textCommand =
+            BLOCK_TEXT_COMMANDS.has(command.name) ||
+            INLINE_TEXT_COMMANDS.has(command.name);
+          const singleArgument =
+            textCommand || ["input", "include", "end"].includes(command.name);
           for (;;) {
+            if (command.name === "par") break;
             const next = /^\s*/.exec(source.slice(end))![0].length + end;
             if (!["{", "["].includes(source[next])) break;
+            // A list item's braced prose is content, not a command argument.
+            if (command.name === "item" && source[next] !== "[") break;
             const group = {
               start: next,
               end: groupEnd(source, next),
@@ -198,6 +223,11 @@ export function planLatex(
             };
             groups.push(group);
             end = group.end;
+            if (
+              (singleArgument && group.open === "{") ||
+              command.name === "item"
+            )
+              break;
           }
           const argument = groups.find((group) => group.open === "{");
           const value = argument
@@ -208,9 +238,16 @@ export function planLatex(
             const close = source.indexOf(marker, end);
             if (close < 0) throw new Error(`LaTeX 环境未闭合：${value}`);
             end = close + marker.length;
+            if (!inline) {
+              flush(i);
+              start = end;
+              i = end;
+              continue;
+            }
           } else if (
             (command.name === "begin" || command.name === "end") &&
-            value === "document"
+            value === "document" &&
+            !inline
           ) {
             end = argument!.end;
             flush(i);
@@ -225,18 +262,39 @@ export function planLatex(
             argument
           ) {
             inputs.push({ path: value.trim(), body: active });
+            if (!inline) {
+              flush(i);
+              start = end;
+              i = end;
+              continue;
+            }
           } else if (command.name === "input" || command.name === "include") {
             throw new Error("轻量后端要求 input/include 使用花括号参数。");
           } else if (
-            TEXT_COMMANDS.has(command.name) &&
+            textCommand &&
             argument &&
             (active || command.name === "title" || command.name === "subtitle")
           ) {
-            // Isolate heading/caption arguments from the surrounding paragraph.
+            if (INLINE_TEXT_COMMANDS.has(command.name) || inline) {
+              // Keep inline prose in its paragraph while protecting the command,
+              // options and braces independently of the translatable argument.
+              protect(source.slice(i, argument.start + 1));
+              scan(argument.start + 1, argument.end - 1, true, true);
+              protect(source.slice(argument.end - 1, end));
+            } else {
+              flush(i);
+              start = argument.start + 1;
+              scan(argument.start + 1, argument.end - 1, true);
+              flush(argument.end - 1);
+              start = end;
+            }
+            i = end;
+            continue;
+          } else if (
+            !inline &&
+            ["begin", "end", "item", "par"].includes(command.name)
+          ) {
             flush(i);
-            start = argument.start + 1;
-            scan(argument.start + 1, argument.end - 1, true);
-            flush(argument.end - 1);
             start = end;
             i = end;
             continue;
@@ -259,30 +317,47 @@ export function planLatex(
   return { units, inputs };
 }
 
+/** Only repair token typography; never infer a missing token or its position. */
+export function normalizeLatexMarkers(text: string): string {
+  return text
+    .replace(
+      /\\?[[［]\s*\\?[[［]\s*HJFY_\s*(\d+)\s*\\?[\]］]\s*\\?[\]］]/g,
+      "[[HJFY_$1]]",
+    )
+    .replace(/`(\[\[HJFY_\d+\]\])`/g, "$1");
+}
+
 export function restoreLatex(unit: LatexUnit, translated: string): string {
   if (typeof translated !== "string" || !translated.trim())
     throw new Error("模型返回空译文。");
+  translated = normalizeLatexMarkers(translated);
   const expected = unit.protected.map((_, index) => `[[HJFY_${index}]]`);
   const actual = translated.match(/\[\[HJFY_\d+\]\]/g) || [];
-  if (actual.join("|") !== expected.join("|")) throw new LatexMarkerError();
+  const found = new Set(actual);
+  // Match the desktop engine: restore by name, require coverage, reject unknown
+  // placeholders. Reordering and repeated occurrences are accepted.
+  const known = new Set(expected);
+  if (
+    !expected.every((id) => found.has(id)) ||
+    actual.some((id) => !known.has(id))
+  )
+    throw new LatexMarkerError();
   const prose = translated.replace(/\[\[HJFY_\d+\]\]/g, "");
+  if (unit.text.replace(/\[\[HJFY_\d+\]\]/g, "").trim() && !prose.trim())
+    throw new Error("模型返回空译文。");
   if (/[\\{}$%&#_^~]|\[\[HJFY_|```/.test(prose))
     throw new Error("模型在译文中引入了未转义的 TeX 语法。");
-  const original = unit.text.replace(/\[\[HJFY_\d+\]\]/g, "").trim();
-  // A standalone scientific acronym (e.g. LIBERO.) needs no Chinese rendering.
-  const unchangedAcronym =
-    /^[A-Z][A-Z0-9]*(?:[-/][A-Z0-9]+)*[.:]?$/.test(original) &&
-    (original.match(/[A-Z]/g)?.length || 0) >= 2 &&
-    translated.trim() === unit.text.trim();
-  if (
-    /[a-zA-Z]{2,}/.test(original) &&
-    !/[\u3400-\u9fff]/.test(prose) &&
-    !unchangedAcronym
-  )
-    throw new Error("模型未返回中文译文。");
   return translated.replace(
     /\[\[HJFY_(\d+)\]\]/g,
-    (_, index) => unit.protected[Number(index)],
+    (marker, index, offset: number) => {
+      const protectedText = unit.protected[Number(index)];
+      // XeTeX treats CJK letters as part of a control word. A model may remove
+      // the whitespace after a marker, merging e.g. \\modelname with Chinese.
+      const next = translated.slice(offset + marker.length);
+      return /\\[a-zA-Z@]+$/.test(protectedText) && /^[\p{L}\p{M}]/u.test(next)
+        ? `${protectedText} `
+        : protectedText;
+    },
   );
 }
 

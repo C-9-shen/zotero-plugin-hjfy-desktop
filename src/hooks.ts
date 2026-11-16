@@ -5,6 +5,10 @@ import {
   configureLightweightKey,
 } from "./modules/lightweightTranslation";
 import { closeTranslationReaders } from "./modules/translationReader";
+import {
+  openTranslationTaskList,
+  closeTranslationTaskList,
+} from "./modules/translationTasks";
 import { getString, initLocale } from "./utils/locale";
 import { createZToolkit } from "./utils/ztoolkit";
 
@@ -72,6 +76,7 @@ async function onMainWindowUnload(_win: Window): Promise<void> {
 async function onShutdown(): Promise<void> {
   addon.data.alive = false;
   closeTranslationReaders();
+  closeTranslationTaskList();
   await DesktopTranslation.cancelAll();
   await LightweightTranslation.cancelAll();
   ztoolkit.unregisterAll();
@@ -81,6 +86,7 @@ async function onShutdown(): Promise<void> {
 }
 
 export default {
+  openTranslationTaskList,
   configureLightweightKey,
   onStartup,
   onShutdown,

@@ -64,6 +64,16 @@ export class TranslationProgressNote {
     await this.flush();
   }
 
+  async remove() {
+    this.finished = true;
+    if (this.timer) {
+      this.timers.clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    await this.pending;
+    await this.note.eraseTx();
+  }
+
   private flush(): Promise<void> {
     if (this.timer) {
       this.timers.clearTimeout(this.timer);

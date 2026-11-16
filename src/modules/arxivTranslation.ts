@@ -5,6 +5,10 @@ import { LightweightTranslation } from "./lightweightTranslation";
 import { getPref } from "../utils/prefs";
 import { TranslationProgressNote } from "./translationProgressNote";
 import { openTranslationReaders } from "./translationReader";
+import {
+  openTranslationTaskList,
+  runTranslationTask,
+} from "./translationTasks";
 
 export class ArxivTranslationFactory {
   /**
@@ -19,6 +23,7 @@ export class ArxivTranslationFactory {
       commandListener: () => {
         const items = ztoolkit.getGlobal("ZoteroPane").getSelectedItems();
         if (items.length > 0) {
+          openTranslationTaskList();
           this.translateSelectedItems(items);
         } else {
           new ztoolkit.ProgressWindow(getString("menuitem-label"))
@@ -37,14 +42,10 @@ export class ArxivTranslationFactory {
   /**
    * 翻译选中的条目
    */
-  private static running = false;
-
   static async translateSelectedItems(items: Zotero.Item[]) {
-    if (this.running) return;
-    this.running = true;
-    try {
-      for (const item of items) {
-        if (!addon.data.alive) break;
+    await Promise.all(
+      items.map(async (item) => {
+        if (!addon.data.alive) return;
         try {
           await this.translateSingleItem(item);
         } catch (error) {
@@ -52,28 +53,32 @@ export class ArxivTranslationFactory {
             error instanceof Error ? error.message : String(error);
           ztoolkit.log("本地翻译失败", message);
         }
-      }
-    } finally {
-      this.running = false;
-    }
+      }),
+    );
   }
 
   static async translateSingleItem(
     item: Zotero.Item,
     update: (text: string) => void = () => {},
   ) {
+    const existing = await this.openExistingTranslation(item, update);
+    if (existing) return existing;
+    return runTranslationTask(
+      item,
+      (report) => this.translateItem(item, report),
+      update,
+    );
+  }
+
+  private static async translateItem(
+    item: Zotero.Item,
+    update: (text: string) => void,
+  ) {
     if (!item.isRegularItem()) throw new Error("请选择文献条目进行翻译。");
     const arxivId = this.extractArxivIdFromItem(item);
-    if (arxivId) {
-      const existing = await this.findExistingTranslationAttachment(
-        item,
-        this.getTranslationAttachmentFilename(item, arxivId),
-      );
-      if (existing) {
-        update(await openTranslationReaders(item, existing));
-        return existing;
-      }
-    }
+    // A queued item may have gained a translation while waiting.
+    const existing = await this.openExistingTranslation(item, update);
+    if (existing) return existing;
     const progress = await TranslationProgressNote.create(item);
     const report = (text: string) => {
       progress.update(text);
@@ -92,7 +97,9 @@ export class ArxivTranslationFactory {
       );
       report("正在添加翻译附件…");
       const attachment = await this.savePdfAsAttachment(item, output, arxivId);
-      await progress.finish("已完成", "翻译已完成，PDF 已添加到当前文献附件。");
+      await backend.cleanup(output);
+      await progress.remove();
+      report("翻译已完成，PDF 已添加到当前文献附件。");
       return attachment;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -101,6 +108,21 @@ export class ArxivTranslationFactory {
         .catch((noteError) => Zotero.logError(noteError));
       throw error;
     }
+  }
+
+  private static async openExistingTranslation(
+    item: Zotero.Item,
+    update: (text: string) => void,
+  ) {
+    if (!item.isRegularItem()) return null;
+    const arxivId = this.extractArxivIdFromItem(item);
+    if (!arxivId) return null;
+    const existing = await this.findExistingTranslationAttachment(
+      item,
+      this.getTranslationAttachmentFilename(item, arxivId),
+    );
+    if (existing) update(await openTranslationReaders(item, existing));
+    return existing;
   }
 
   static extractArxivIdFromItem(item: Zotero.Item): string | null {

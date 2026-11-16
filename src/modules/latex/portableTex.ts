@@ -6,6 +6,7 @@ const VERSION = "0.17.0";
 const ARCHIVE_SHA256 =
   "f61ce51f0b0ade1015b7de7ef368541c5424e9756ecbd0d7af97d6d48030845f";
 export const TECTONIC_URL = `https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${VERSION}/tectonic-${VERSION}-x86_64-pc-windows-msvc.zip`;
+let preparing: Promise<string> | undefined;
 
 export async function ensurePortableTex(
   update: (text: string) => void,
@@ -19,6 +20,19 @@ export async function ensurePortableTex(
       throw new Error("便携 TeX 程序路径无效，请选择 tectonic.exe。");
     return configured;
   }
+  if (preparing) {
+    update("正在等待便携 TeX 准备完成…");
+    return preparing;
+  }
+  preparing = preparePortableTex(update);
+  try {
+    return await preparing;
+  } finally {
+    preparing = undefined;
+  }
+}
+
+async function preparePortableTex(update: (text: string) => void) {
   if (!Zotero.isWin || !Services.appinfo.XPCOMABI.startsWith("x86_64"))
     throw new Error(
       "自动下载便携 TeX 目前仅支持 Windows x64，请手动指定 Tectonic 路径。",

@@ -1,9 +1,11 @@
 import { strFromU8 } from "fflate";
 import { getPref } from "../utils/prefs";
 import { readSourceArchive } from "../utils/sourceArchive";
+import { TaskQueue } from "../utils/taskQueue";
 
 const PACKAGE_NAME = "A65FC766.2255F2ECFA78";
 const PACKAGE_FAMILY = `${PACKAGE_NAME}_swakhz099rbkj`;
+const enginePreparation = new TaskQueue(1);
 
 export function findDesktopInstallation(): string {
   const configured = String(
@@ -121,7 +123,9 @@ export async function prepareDesktopTask(
   const engineDir = PathUtils.join(runtime, hash);
   await IOUtils.makeDirectory(engineDir, { createAncestors: true });
   const engine = PathUtils.join(engineDir, "hjfy-office.exe");
-  if (!(await IOUtils.exists(engine))) await IOUtils.copy(bundled, engine);
+  await enginePreparation.run(engine, async () => {
+    if (!(await IOUtils.exists(engine))) await IOUtils.copy(bundled, engine);
+  });
 
   const data =
     String(getPref("desktop.dataDirectory") || "").trim() ||

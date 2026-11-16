@@ -21,6 +21,15 @@ interface DesktopEvent {
 export class DesktopTranslation {
   private static active = new Set<any>();
   private static generation = 0;
+  private static completed = new Map<string, string>();
+
+  static async cleanup(output: string) {
+    const job = this.completed.get(output);
+    if (!job) return;
+    // Only remove the task directory recorded by this backend after import.
+    await IOUtils.remove(job, { recursive: true, ignoreAbsent: true });
+    this.completed.delete(output);
+  }
 
   private static prepareTask = prepareDesktopTask;
 
@@ -158,6 +167,7 @@ export class DesktopTranslation {
       const header = await IOUtils.read(output, { maxBytes: 5 });
       if (String.fromCharCode(...header) !== "%PDF-")
         throw new Error("翻译结果不是有效的 PDF。");
+      this.completed.set(output, job);
       return output;
     } finally {
       this.active.delete(process);

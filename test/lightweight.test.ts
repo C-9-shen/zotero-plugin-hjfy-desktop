@@ -98,11 +98,7 @@ Another paragraph with \ref{sec:test}.
         await ArxivTranslationFactory.translateSingleItem(item);
       assert.equal(attachment.parentID, item.id);
       assert.isTrue(await attachment.fileExists());
-      assert.lengthOf(item.getNotes(), 1);
-      const note = Zotero.Items.get(item.getNotes()[0]);
-      assert.include(note.getNote(), "已完成");
-      assert.include(note.getNote(), "正文翻译");
-      assert.notInclude(note.getNote(), "hjfy-local-fixture");
+      assert.lengthOf(item.getNotes(), 0);
       const after = JSON.parse(
         (await Zotero.HTTP.request("GET", baseUrl.replace(/\/v1$/, "/stats")))
           .responseText || "{}",
@@ -120,7 +116,6 @@ Another paragraph with \ref{sec:test}.
       ).calls;
       assert.equal(cachedCalls, after);
       assert.isAtMost(downloads, 1);
-      const savedNote = note.getNote();
       const readerOpen = Zotero.Reader.open;
       Zotero.Reader.open = (async () => {}) as any;
       try {
@@ -128,8 +123,7 @@ Another paragraph with \ref{sec:test}.
           await ArxivTranslationFactory.translateSingleItem(item);
         assert.equal(reopened.id, attachment.id);
         assert.lengthOf(item.getAttachments(), 1);
-        assert.deepEqual(item.getNotes(), [note.id]);
-        assert.equal(note.getNote(), savedNote);
+        assert.lengthOf(item.getNotes(), 0);
       } finally {
         Zotero.Reader.open = readerOpen;
       }

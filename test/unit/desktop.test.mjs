@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setImmediate, setTimeout, clearTimeout } from "node:timers";
 import { build } from "esbuild";
 import {
   mkdtemp,
@@ -19,6 +20,9 @@ const bundle = await build({
   stdin: {
     contents: `export { ArxivTranslationFactory } from './src/modules/arxivTranslation';
       export { DesktopTranslation } from './src/modules/desktopTranslation';
+      export { LightweightTranslation } from './src/modules/lightweightTranslation';
+      export { ensurePortableTex } from './src/modules/latex/portableTex';
+      export { translationTaskSnapshot } from './src/modules/translationTasks';
       export { openTranslationReaders } from './src/modules/translationReader';
       export { readSourceArchive } from './src/utils/sourceArchive';
       export { getPageProgress, getPageScrollTop } from './src/utils/pageProgress';
@@ -33,6 +37,9 @@ const bundle = await build({
 const {
   ArxivTranslationFactory: Factory,
   DesktopTranslation,
+  LightweightTranslation,
+  ensurePortableTex,
+  translationTaskSnapshot,
   openTranslationReaders,
   readSourceArchive,
   getPageProgress,
@@ -421,6 +428,245 @@ test("batch translation continues after failures without opening progress notifi
   }
 });
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test("translation queue accepts new batches, limits parallel jobs, deduplicates items and survives failures", async () => {
+  const original = Factory.translateItem;
+  const gates = new Map([1, 2, 3, 4].map((id) => [id, deferred()]));
+  const started = [];
+  const errors = [];
+  let active = 0,
+    maximum = 0;
+  const items = [1, 2, 3, 4].map((id) => ({
+    id,
+    libraryID: 908,
+    isRegularItem: () => true,
+    getField: () => "",
+    getDisplayTitle: () => `Paper ${id}`,
+  }));
+  globalThis.addon = { data: { alive: true } };
+  globalThis.ztoolkit = { log: (...args) => errors.push(args) };
+  Factory.translateItem = async (item, report) => {
+    started.push(item.id);
+    active++;
+    maximum = Math.max(maximum, active);
+    report(`progress ${item.id}`);
+    await gates.get(item.id).promise;
+    active--;
+    if (item.id === 2) throw new Error("queue fixture failure");
+    return item.id;
+  };
+  const first = Factory.translateSelectedItems(items.slice(0, 3));
+  const second = Factory.translateSelectedItems([items[1], items[3]]);
+  const duplicate = Factory.translateSingleItem(items[0]);
+  try {
+    await tick();
+    assert.deepEqual(started, [1, 2]);
+    const states = translationTaskSnapshot().filter((t) =>
+      t.key.startsWith("908:"),
+    );
+    assert.deepEqual(
+      states.map((t) => t.status),
+      ["运行中", "运行中", "排队中", "排队中"],
+    );
+    gates.get(1).resolve();
+    await tick();
+    assert.deepEqual(started, [1, 2, 3]);
+    gates.get(2).resolve();
+    await tick();
+    assert.deepEqual(started, [1, 2, 3, 4]);
+    gates.get(3).resolve();
+    gates.get(4).resolve();
+    await Promise.all([first, second, duplicate]);
+    assert.equal(maximum, 2);
+    assert.ok(errors.length >= 1);
+    assert.equal(
+      translationTaskSnapshot().find((t) => t.key === "908:2").status,
+      "失败",
+    );
+    // Completed tasks can be submitted again (e.g. to open an existing PDF).
+    await Factory.translateSingleItem(items[0]);
+    assert.equal(started.filter((id) => id === 1).length, 2);
+  } finally {
+    for (const gate of gates.values()) gate.resolve();
+    await Promise.allSettled([first, second, duplicate]);
+    Factory.translateItem = original;
+  }
+});
+
+test("successful imports remove their progress note and diagnostics while failures retain their note", async () => {
+  const originalTranslate = LightweightTranslation.translate;
+  const originalCleanup = LightweightTranslation.cleanup;
+  const originalSave = Factory.savePdfAsAttachment;
+  const events = [],
+    notes = [];
+  let failing = false;
+  globalThis.addon = { data: { alive: true } };
+  globalThis.ChromeUtils = {
+    importESModule: () => ({ setTimeout, clearTimeout }),
+  };
+  globalThis.Zotero = {
+    Prefs: { get: () => "lightweight" },
+    logError: (error) => {
+      throw error;
+    },
+    Item: class {
+      constructor() {
+        notes.push(this);
+      }
+      setNote(html) {
+        this.html = html;
+      }
+      async saveTx() {
+        this.id = 99;
+        events.push("save-note");
+      }
+      async eraseTx() {
+        events.push("erase-note");
+      }
+    },
+  };
+  const item = {
+    id: 500,
+    libraryID: 909,
+    isRegularItem: () => true,
+    getDisplayTitle: () => "Lifecycle paper",
+    getAttachments: () => [],
+    getField: (name) =>
+      name === "url" ? "https://arxiv.org/abs/2610.34593v1" : "",
+  };
+  LightweightTranslation.translate = async (_id, report) => {
+    events.push("translate");
+    report("正文翻译 1/2");
+    if (failing) throw new Error("failure <diagnostic>");
+    return "output.pdf";
+  };
+  LightweightTranslation.cleanup = async () => {
+    events.push("cleanup");
+  };
+  Factory.savePdfAsAttachment = async () => {
+    events.push("import");
+    return { id: 200 };
+  };
+  try {
+    await Factory.translateSingleItem(item);
+    assert.ok(events.indexOf("import") < events.indexOf("cleanup"));
+    assert.ok(events.indexOf("cleanup") < events.indexOf("erase-note"));
+    const saved = events.filter((event) => event === "save-note").length;
+    await tick();
+    assert.equal(events.filter((event) => event === "save-note").length, saved);
+    events.length = 0;
+    failing = true;
+    await assert.rejects(Factory.translateSingleItem(item), /failure/);
+    assert.ok(!events.includes("cleanup"));
+    assert.ok(!events.includes("erase-note"));
+    assert.ok(notes.at(-1).html.includes("失败"));
+    assert.ok(notes.at(-1).html.includes("&lt;diagnostic&gt;"));
+  } finally {
+    LightweightTranslation.translate = originalTranslate;
+    LightweightTranslation.cleanup = originalCleanup;
+    Factory.savePdfAsAttachment = originalSave;
+  }
+});
+
+test("concurrent portable TeX preparation shares one initialization and can retry after failure", async () => {
+  let reads = 0;
+  const gate = deferred();
+  globalThis.PathUtils = { profileDir: "fixture", join: path.join };
+  globalThis.Zotero = { isWin: true, Prefs: { get: () => "" } };
+  globalThis.Services = { appinfo: { XPCOMABI: "x86_64-msvc" } };
+  globalThis.IOUtils = {
+    exists: async () => true,
+    readJSON: async () => {
+      reads++;
+      await gate.promise;
+      return {
+        archive:
+          "f61ce51f0b0ade1015b7de7ef368541c5424e9756ecbd0d7af97d6d48030845f",
+        executable: "fixture-digest",
+      };
+    },
+    computeHexDigest: async () => "fixture-digest",
+  };
+  const updates = [];
+  const a = ensurePortableTex((text) => updates.push(text));
+  const b = ensurePortableTex((text) => updates.push(text));
+  await tick();
+  assert.equal(reads, 1);
+  gate.resolve();
+  assert.equal(await a, await b);
+  assert.ok(updates.some((text) => text.includes("等待")));
+  globalThis.IOUtils.readJSON = async () => {
+    throw new Error("receipt fixture failure");
+  };
+  await assert.rejects(
+    ensurePortableTex(() => {}),
+    /receipt fixture/,
+  );
+  globalThis.IOUtils.readJSON = async () => ({
+    archive: "f61ce51f0b0ade1015b7de7ef368541c5424e9756ecbd0d7af97d6d48030845f",
+    executable: "fixture-digest",
+  });
+  assert.ok(await ensurePortableTex(() => {}));
+});
+
+test("portable compilers serialize shared cache access and cancelled queued jobs never launch", async () => {
+  const gate = deferred();
+  let launches = 0,
+    cancelled = false;
+  globalThis.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: {
+        call: async () => {
+          launches++;
+          return {
+            stdin: { close: async () => {} },
+            stdout: { readString: async () => "" },
+            stderr: { readString: async () => "" },
+            wait: async () => {
+              await gate.promise;
+              return { exitCode: 0 };
+            },
+          };
+        },
+      },
+    }),
+  };
+  const first = LightweightTranslation.runCompiler(
+    "tectonic",
+    [],
+    "job-one",
+    "cache",
+    () => {},
+    () => {},
+  );
+  const second = LightweightTranslation.runCompiler(
+    "tectonic",
+    [],
+    "job-two",
+    "cache",
+    () => {},
+    () => {
+      if (cancelled) throw new Error("cancelled");
+    },
+  );
+  const rejected = assert.rejects(second, /cancelled/);
+  await tick();
+  assert.equal(launches, 1);
+  cancelled = true;
+  gate.resolve();
+  await first;
+  await rejected;
+  assert.equal(launches, 1);
+});
+
 test("existing translations open beside the available original and fall back to a single reader", async () => {
   const translation = { id: 5 };
   const attachments = [
@@ -480,7 +726,7 @@ test("existing translations open beside the available original and fall back to 
   assert.deepEqual(calls, [{ id: 5, location: undefined, options: undefined }]);
 });
 
-test("opening an existing translation never creates or updates a log note", async () => {
+test("opening an existing translation bypasses a busy queue and never creates or updates a log note", async () => {
   const translated = {
     id: 75,
     attachmentFilename: "Paper_hjfy_arxiv_2610.34593v1.pdf",
@@ -509,7 +755,36 @@ test("opening an existing translation never creates or updates a log note", asyn
       },
     },
   };
-  for (let i = 0; i < 2; i++)
-    assert.equal(await Factory.translateSingleItem(parent), translated);
-  assert.equal(opened, 2);
+  const gate = deferred();
+  const original = Factory.translateItem;
+  const blockers = [];
+  try {
+    Factory.translateItem = () => gate.promise;
+    for (const id of [801, 802])
+      blockers.push(
+        Factory.translateSingleItem({
+          id,
+          libraryID: 910,
+          isRegularItem: () => true,
+          getField: () => "",
+          getDisplayTitle: () => `Busy ${id}`,
+        }),
+      );
+    await tick();
+    Factory.translateItem = original;
+    for (let i = 0; i < 2; i++) {
+      let result;
+      const opening = Factory.translateSingleItem(parent).then((item) => {
+        result = item;
+      });
+      await tick();
+      assert.equal(result, translated);
+      await opening;
+    }
+    assert.equal(opened, 2);
+  } finally {
+    gate.resolve();
+    await Promise.allSettled(blockers);
+    Factory.translateItem = original;
+  }
 });

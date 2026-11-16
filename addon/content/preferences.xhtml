@@ -3,6 +3,13 @@
   xmlns:html="http://www.w3.org/1999/xhtml"
 >
   <html:h2>幻觉翻译</html:h2>
+  <button
+    label="打开翻译任务列表…"
+    oncommand="Zotero.HjfyArxiv.hooks.openTranslationTaskList()"
+  />
+  <html:p
+    >翻译任务自动排队，同时处理最多两篇。成功后删除本次日志和临时诊断文件，失败日志保留。</html:p
+  >
   <html:label for="hjfy-translation-backend">翻译方式</html:label>
   <html:select
     id="hjfy-translation-backend"

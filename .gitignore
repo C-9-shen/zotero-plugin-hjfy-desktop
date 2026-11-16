@@ -1,25 +1,50 @@
 # OS and editor files
 .DS_Store
+._*
 Thumbs.db
 Desktop.ini
 *.swp
 *.swo
+*.code-workspace
+/.idea/
+/.vscode/*
+!/.vscode/extensions.json
+!/.vscode/launch.json
+!/.vscode/settings.json
 
 # Node.js
 /node_modules/
+/.npm/
+/.cache/
+.eslintcache
+.prettiercache
 pnpm-lock.yaml
 yarn.lock
 
-# TSC
+# TypeScript and test outputs
 *.tsbuildinfo
+/coverage/
+/.nyc_output/
 
-# Scaffold
+# Local environment (keep the configuration template)
 .env
 .env.*
 !.env.example
+
+# Scaffold and generated artifacts
 /.scaffold/
 /build/
+/dist/
 /logs/
 /output/
 *.log
 *.xpi
+
+# Temporary files and patch backups
+/tmp/
+/temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
