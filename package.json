@@ -1,7 +1,7 @@
 {
   "name": "zotero-plugin-hjfy",
   "type": "module",
-  "version": "0.3.8",
+  "version": "0.3.16",
   "description": "Translate arXiv LaTeX sources with a built-in lightweight API backend and portable TeX or the HJFY Desktop engine",
   "config": {
     "addonName": "幻觉翻译 arXiv 翻译",
@@ -26,13 +26,13 @@
   },
   "scripts": {
     "start": "zotero-plugin serve",
-    "build": "zotero-plugin build && tsc --noEmit",
+    "build": "tsc --noEmit && zotero-plugin build",
     "lint:check": "prettier --check . && eslint .",
     "lint:fix": "prettier --write . && eslint . --fix",
     "release": "zotero-plugin release",
     "test": "zotero-plugin test",
     "update-deps": "npm update --save",
-    "test:unit": "node --test test/unit/desktop.test.mjs test/unit/lightweight.test.mjs",
+    "test:unit": "node --test test/unit/desktop.test.mjs test/unit/lightweight.test.mjs test/unit/texDependencies.test.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json"
   },
   "dependencies": {

@@ -8,7 +8,7 @@ import { setImmediate } from "node:timers/promises";
 
 const bundle = await build({
   stdin: {
-    contents: `export * from './src/modules/latex/source'; export * from './src/modules/latex/pipeline'; export * from './src/modules/latex/api';`,
+    contents: `export * from './src/modules/latex/source'; export * from './src/modules/latex/pipeline'; export * from './src/modules/latex/api'; export * from './src/modules/latex/request'; export * from './src/modules/latex/tectonicSource'; export * from './src/modules/latex/chineseCompilation'; export * from './src/modules/latex/texCompiler';`,
     resolveDir: process.cwd(),
   },
   bundle: true,
@@ -27,6 +27,16 @@ const {
   translateLatexProject,
   modelRequest,
   modelResponse,
+  ModelRequestError,
+  modelRequestFailure,
+  retryModelRequest,
+  prepareTectonicSource,
+  prepareBundledBibliography,
+  assertResolvedReferences,
+  prepareChineseCompilation,
+  findLocalTex,
+  texArguments,
+  texFailure,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`
 );
@@ -101,6 +111,202 @@ We study $x_i^2$ and \cite{key} with \method. % Keep this comment
     addChineseSupport(addChineseSupport(output)),
     addChineseSupport(output),
   );
+});
+
+test("Chinese compilation setup precedes font loading, preserves content and skips examples and fragments", () => {
+  const source = String.raw`% \\documentclass{fake}
+\begin{filecontents*}{example.tex}
+\documentclass{example}
+\begin{document}Example\end{document}
+\end{filecontents*}
+\documentclass{article}
+\usepackage{template/swam-layout}
+\usepackage{template/swam-highlights}
+\begin{document}
+\studyhl{yellow}{中文结果 \textbf{中文粗体} $x$ \cite{key}}.
+\end{document}`;
+  for (const input of [source, source.replaceAll("\n", "\r\n")]) {
+    const prepared = prepareChineseCompilation(input);
+    const classOffset = input.indexOf("\\documentclass{article}");
+    assert.equal(prepared.slice(0, classOffset), input.slice(0, classOffset));
+    assert.ok(
+      prepared.indexOf("\\PassOptionsToPackage{no-math}{fontspec}") <
+        prepared.indexOf("\\documentclass{article}"),
+    );
+    assert.ok(
+      prepared.includes(
+        "\\microtypesetup{protrusion=false,expansion=false,tracking=false}",
+      ),
+    );
+    assert.ok(prepared.includes("\\RequirePackage{xeCJKfntef}"));
+    assert.ok(
+      prepared.includes(
+        "\\AddToHook{cmd/enit@style@multiline/after}{\\enit@boxdesctrue}",
+      ),
+    );
+    assert.ok(prepared.includes("\\SOUL@hlcolor"));
+    assert.ok(prepared.includes(String.raw`\@ifpackageloaded{wrapstuff}`));
+    for (const environment of ["figure", "figure*", "table", "table*"])
+      assert.ok(
+        prepared.includes(
+          `\\AddToHook{env/${environment}/before}{\\wrapstuffclear}`,
+        ),
+      );
+    assert.ok(
+      prepared.endsWith(input.slice(input.lastIndexOf("\\begin{document}"))),
+    );
+    assert.equal(prepareChineseCompilation(prepared), prepared);
+  }
+  for (const input of [
+    "中文正文。",
+    String.raw`\documentclass{article}`,
+    String.raw`\begin{verbatim}\documentclass{article}\begin{document}\end{verbatim}`,
+  ])
+    assert.equal(prepareChineseCompilation(input), input);
+});
+
+test("Tectonic preparation disables standalone pdfoutput assignments without altering comments, examples or line numbers", () => {
+  const source = String.raw`\pdfoutput=1
+\documentclass{ieeeconf}
+\pdfoutput = 1 % Force pdfTeX mode on arXiv
+  \global\pdfoutput 1\relax
+\pdfoutput=0
+\pdfoutput=12
+\pdfoutput=\mode
+\newcommand{\example}{\pdfoutput=1}
+% \pdfoutput=1
+\begin{verbatim}
+\pdfoutput=1
+\end{verbatim}
+\begin{lstlisting}[language=TeX]
+\pdfoutput=1
+\end{lstlisting}
+\begin{filecontents*}{sample.tex}
+\pdfoutput=1
+\end{filecontents*}
+\verb|\pdfoutput=1|
+\usepackage{hyperref}
+\begin{document}
+中文 $x$.
+\end{document}`;
+  for (const input of [source, source.replaceAll("\n", "\r\n")]) {
+    const prepared = prepareTectonicSource(input);
+    assert.deepEqual(prepared.lines, [1, 3, 4, 5, 6]);
+    const before = input.split("\n"),
+      after = prepared.source.split("\n");
+    assert.equal(after.length, before.length);
+    assert.equal(prepared.source.length, input.length);
+    for (let line = 0; line < before.length; line++)
+      if (!prepared.lines.includes(line + 1))
+        assert.equal(after[line], before[line]);
+    assert.ok(after[2].endsWith(before[2].slice(before[2].indexOf("%"))));
+    assert.deepEqual(prepareTectonicSource(prepared.source), {
+      source: prepared.source,
+      lines: [],
+    });
+  }
+  assert.deepEqual(prepareTectonicSource("\\pdfoutput=1"), {
+    source: " ".repeat(12),
+    lines: [1],
+  });
+  assert.equal(
+    prepareTectonicSource("\\pdfoutput=1text").source,
+    "\\pdfoutput=1text",
+  );
+});
+
+test("bundled bibliography survives compilation preparation without changing citation commands or examples", () => {
+  const source = String.raw`\documentclass{article}
+\begin{document}
+Results from \citep[see][p. 3]{first,second} and Eq.~\eqref{eq:one}.
+% \bibliography{commented}
+\verb|\bibliography{example}|
+\begin{verbatim}
+\bibliographystyle{example}
+\bibliography{example}
+\end{verbatim}
+\bibliographystyle{IEEEtranN}
+\bibliography{% Keep this comment
+references}
+\end{document}`;
+  for (const input of [source, source.replaceAll("\n", "\r\n")]) {
+    const prepared = prepareBundledBibliography(input);
+    assert.equal(prepared.replacements, 1);
+    assert.ok(prepared.source.includes(String.raw`\input{\jobname.bbl}`));
+    assert.ok(
+      !prepared.source.includes(String.raw`\bibliographystyle{IEEEtranN}`),
+    );
+    assert.ok(prepared.source.includes("% Keep this comment"));
+    assert.equal(prepared.source.split("\n").length, input.split("\n").length);
+    assert.ok(
+      prepared.source.includes(
+        input.slice(0, input.indexOf("\\bibliographystyle{IEEEtranN}")),
+      ),
+    );
+    assert.deepEqual(prepareBundledBibliography(prepared.source), {
+      source: prepared.source,
+      replacements: 0,
+    });
+  }
+  assert.deepEqual(prepareBundledBibliography("No bibliography here."), {
+    source: "No bibliography here.",
+    replacements: 0,
+  });
+});
+
+test("unresolved citation and reference warnings prevent importing an incomplete translation", () => {
+  for (const warning of [
+    "Package natbib Warning: Citation `author2026' on page 1 undefined on input line 4.",
+    "LaTeX Warning: Reference `eq:one' on page 2 undefined on input line 4.",
+    "LaTeX Warning: Reference `very-long-key' on page 2\n undefined on input line 4.",
+    "LaTeX Warning: There were undefined references.",
+    "Package natbib Warning: There were undefined citations.",
+  ]) {
+    assert.throws(
+      () => assertResolvedReferences(warning),
+      /未解析的文献引用或交叉引用/,
+    );
+  }
+  assert.throws(
+    () =>
+      assertResolvedReferences(
+        "LaTeX Warning: Reference `eq:one' on page 2\n undefined on input line 4.",
+      ),
+    /eq:one/,
+  );
+  for (const log of [
+    "",
+    "Package subfig Warning: Your document class has a bad definition of \\endfigure.",
+    "LaTeX Font Warning: Font shape `TU/ptm/m/n' undefined",
+    "Package hyperref Warning: Token not allowed in a PDF string (Unicode).",
+  ])
+    assert.doesNotThrow(() => assertResolvedReferences(log));
+});
+
+test("translation preserves complete citation arguments, labels and cross-reference targets", () => {
+  const references = [
+    String.raw`\cite{author2026,other2025}`,
+    String.raw`\citep[see][p.~3]{author2026}`,
+    String.raw`\citet*{author2026}`,
+    String.raw`\ref{sec:one}`,
+    String.raw`\eqref{eq:one}`,
+    String.raw`\autoref{fig:one}`,
+    String.raw`\cref{tab:one,fig:one}`,
+    String.raw`\hyperref[sec:one]{Section one}`,
+    String.raw`\label{sec:one}`,
+  ];
+  const source =
+    String.raw`\documentclass{article}\begin{document}` +
+    references.map((command) => `See the result ${command}.`).join("\n\n") +
+    String.raw`\end{document}`;
+  const { units } = planLatex(source);
+  const output = applyLatexUnits(
+    source,
+    units,
+    units.map((unit) => translate(unit.text)),
+  );
+  for (const reference of references)
+    assert.ok(output.includes(reference), reference);
 });
 
 test("paragraph extraction keeps nested inline formatting and footnotes in context with independent block units", () => {
@@ -265,6 +471,40 @@ test("LaTeX validation rejects token corruption and introduced syntax while acce
   );
 });
 
+test("literal prose punctuation is escaped without altering protected syntax or existing escapes", () => {
+  const unit = planLatex(
+    String.raw`We evaluate all methods with a 50/50 split and $x_i$; see \ref{results}.`,
+    true,
+  ).units[0];
+  const text =
+    "成功与失败各占 50%，使用 A&B、#1 和 model_name。[[HJFY_0]]与[[HJFY_1]]。";
+  const expected = String.raw`成功与失败各占 50\%，使用 A\&B、\#1 和 model\_name。$x_i$与\ref{results}。`;
+  assert.equal(restoreLatex(unit, text), expected);
+  assert.equal(
+    restoreLatex(
+      unit,
+      String.raw`成功与失败各占 50\%，使用 A\&B、\#1 和 model\_name。[[HJFY_0]]与[[HJFY_1]]。`,
+    ),
+    expected,
+  );
+  for (const syntax of [
+    String.raw`\input{evil}`,
+    "$x$",
+    "{",
+    "}",
+    "^",
+    "~",
+    String.raw`\\%`,
+    "```",
+    "[[HJFY_",
+  ])
+    assert.throws(() => restoreLatex(unit, text + syntax), /TeX/);
+  assert.throws(
+    () => restoreLatex(unit, String.raw`结果\\[[HJFY_0]]%[[HJFY_1]]。`),
+    /TeX/,
+  );
+});
+
 test("restoring protected control words keeps their boundary before translated letters and cached output", async () => {
   const source = String.raw`\documentclass{article}
 \newcommand{\modelname}{Rollback}
@@ -316,6 +556,124 @@ Experiments show \modelname achieves better results.
   assert.equal(output.cacheHits, 1);
   assert.equal(cached, before);
   assert.ok(output.files.get("main.tex").includes(String.raw`\modelname 实现`));
+});
+
+test("control words outside units remain separate from trimmed model and cached prose", async () => {
+  for (const command of [String.raw`\item`, String.raw`\par`]) {
+    const source = `${command} A useful result.`;
+    const units = planLatex(source, true).units;
+    assert.equal(units.length, 1);
+    assert.equal(applyLatexUnits(source, units, [units[0].text]), source);
+    assert.equal(
+      applyLatexUnits(source, units, ["我们提出新方法。"]),
+      `${command} 我们提出新方法。`,
+    );
+    assert.equal(
+      applyLatexUnits(source, units, ["English result."]),
+      `${command} English result.`,
+    );
+  }
+  const source = String.raw`\documentclass{article}\begin{document}
+\begin{itemize}
+\item A useful result.
+\item Another useful result.
+\end{itemize}\end{document}`;
+  const result = await translateLatexProject(
+    new Map([["main.tex", source]]),
+    {
+      cacheKey: "old-item-cache",
+      translate: async () => assert.fail("Must reuse cache"),
+    },
+    {
+      read: async () => "我们提出新方法。",
+      write: async () => assert.fail("Must reuse cache"),
+    },
+    hash,
+    () => {},
+    () => {},
+  );
+  assert.equal(result.cacheHits, 2);
+  assert.equal(
+    (result.files.get("main.tex").match(/\\item 我们/g) || []).length,
+    2,
+  );
+});
+
+test("adjacent protected tokens keep lexical boundaries without changing control symbols", () => {
+  const unit = {
+    text: "A result [[HJFY_0]][[HJFY_1]].",
+    protected: [String.raw`\model`, "Name"],
+    start: 0,
+    end: 0,
+  };
+  assert.equal(
+    restoreLatex(unit, "结果[[HJFY_0]][[HJFY_1]]。"),
+    String.raw`结果\model Name。`,
+  );
+  const symbol = { ...unit, protected: [String.raw`\\item`, "Name"] };
+  assert.equal(
+    restoreLatex(symbol, "结果[[HJFY_0]][[HJFY_1]]。"),
+    String.raw`结果\\itemName。`,
+  );
+  const source = String.raw`\中文宏 A result.`;
+  const units = [
+    {
+      start: source.indexOf(" A"),
+      end: source.length,
+      text: " A result.",
+      protected: [],
+    },
+  ];
+  assert.equal(
+    applyLatexUnits(source, units, ["译文。"]),
+    String.raw`\中文宏译文。`,
+  );
+});
+
+test("installed TeX is discovered completely and compile arguments preserve isolation", async () => {
+  const local = await findLocalTex(async (name) => `C:/TeX/bin/${name}.exe`);
+  assert.deepEqual(local, { command: "C:/TeX/bin/latexmk.exe", kind: "local" });
+  for (const missing of ["latexmk", "xelatex", "bibtex", "kpsewhich"]) {
+    assert.equal(
+      await findLocalTex(async (name) => {
+        if (name === missing) throw Error("Not installed");
+        return `C:/TeX/bin/${name}.exe`;
+      }),
+      undefined,
+    );
+  }
+  const args = texArguments(local, "C:/paper/main.tex", "C:/out", true);
+  for (const option of ["-norc", "-no-shell-escape", "-xdv", "-outdir=C:/out"])
+    assert.ok(args.includes(option));
+  assert.ok(!args.includes("-pdfxe"));
+  assert.ok(texArguments(local, "main.tex", "out").includes("-pdfxe"));
+  assert.ok(
+    texArguments(
+      { ...local, bundledBibliography: true },
+      "main.tex",
+      "out",
+    ).includes("-bibtex-"),
+  );
+  assert.ok(!texArguments(local, "main.tex", "out").includes("-bibtex-"));
+  const older =
+    "Package wrapstuff Error: Support package expl3 too old.\n" +
+    "font summary\n".repeat(400);
+  assert.ok(texFailure(older, true).includes("expl3 too old"));
+  const portable = { kind: "portable", command: "tectonic.exe" };
+  assert.ok(texArguments(portable, "main.tex", "out", true).includes("xdv"));
+  assert.ok(texArguments(portable, "main.tex", "out").includes("--untrusted"));
+  assert.match(
+    texFailure("! LaTeX Error: File `wrapstuff.sty' not found.", false),
+    /缺少 TeX 依赖 wrapstuff.sty/,
+  );
+  assert.match(
+    texFailure("! LaTeX Error: File `wrapstuff.sty' not found.", false),
+    /便携 TeX 编译失败/,
+  );
+  assert.match(
+    texFailure("! LaTeX Error: File `wrapstuff.sty' not found.", true),
+    /本机 TeX 编译失败/,
+  );
 });
 
 test("numeric TeX layout assignments stay protected and invalidate only affected segment caches", async () => {
@@ -776,10 +1134,20 @@ Second observation $y$ confirms the result.
       ),
       /保护标记/,
     );
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 4);
     assert.equal(calls[0], calls[1]);
     assert.ok(calls[0].includes("First observation"));
     assert.ok(calls[0].includes("Second observation"));
+    assert.equal(calls[2], calls[3]);
+    assert.deepEqual(
+      JSON.parse(calls[2]).segments.map((s) => s.id),
+      [1],
+    );
+    assert.equal(
+      JSON.parse(calls[2]).segments[0].text,
+      JSON.parse(calls[0]).segments[0].text,
+      "Shrinking a batch must never split a source paragraph",
+    );
     assert.equal(values.size, 0);
   }
 });
@@ -1117,7 +1485,10 @@ test("invalid batch identity never contaminates cache and diagnostic failures pr
           diagnostic: async (record) => {
             diagnostics++;
             assert.ok(record.request.includes("First useful"));
-            assert.equal(record.issues.length, 3);
+            assert.equal(
+              record.issues.length,
+              JSON.parse(record.request).segments.length,
+            );
             throw Error("Disk unavailable");
           },
           translate: async (text) => {
@@ -1143,8 +1514,8 @@ test("invalid batch identity never contaminates cache and diagnostic failures pr
       ),
       /JSON/,
     );
-    assert.equal(calls, 2);
-    assert.equal(diagnostics, 2);
+    assert.equal(calls, 4);
+    assert.equal(diagnostics, 4);
     assert.equal(writes, 0);
   }
 });
@@ -1243,6 +1614,228 @@ test("dense paragraphs stay whole even when a single paragraph exceeds the marke
   assert.ok(result.files.get("main.tex").includes("$x_59$"));
 });
 
+test("HTTP retries distinguish configuration failures, honor bounded Retry-After and stop on cancellation", async () => {
+  const now = Date.parse("2026-11-16T00:00:00Z");
+  assert.equal(modelRequestFailure(429, "3", now).retryAfterMs, 3000);
+  assert.equal(
+    modelRequestFailure(503, "Mon, 16 Nov 2026 00:00:05 GMT", now).retryAfterMs,
+    5000,
+  );
+  for (const header of [null, "invalid", "-1", "Sun, 15 Nov 2026 00:00:00 GMT"])
+    assert.equal(modelRequestFailure(429, header, now).retryAfterMs, 0);
+  assert.equal(modelRequestFailure(429, "999999999", now).retryAfterMs, 30000);
+  const delays = [],
+    updates = [];
+  let calls = 0;
+  const result = await retryModelRequest(
+    async () => {
+      calls++;
+      if (calls === 1) throw modelRequestFailure(429, "3", now);
+      if (calls === 2) throw modelRequestFailure(503);
+      return "recovered";
+    },
+    async (delay) => delays.push(delay),
+    () => {},
+    (text) => updates.push(text),
+  );
+  assert.equal(result, "recovered");
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [3000, 2000]);
+  assert.ok(updates[0].includes("HTTP 429"));
+  for (const status of [0, 408, 425, 429, 500, 502, 503, 504])
+    assert.equal(modelRequestFailure(status).retryable, true);
+  for (const status of [400, 401, 403, 404, 413, 422]) {
+    calls = 0;
+    await assert.rejects(
+      retryModelRequest(
+        async () => {
+          calls++;
+          throw modelRequestFailure(status);
+        },
+        async () => assert.fail("Configuration failures must not wait"),
+        () => {},
+        () => {},
+      ),
+      new RegExp(`HTTP ${status}`),
+    );
+    assert.equal(calls, 1);
+  }
+  let cancelled = false;
+  calls = 0;
+  await assert.rejects(
+    retryModelRequest(
+      async () => {
+        calls++;
+        throw modelRequestFailure(503);
+      },
+      async () => {
+        cancelled = true;
+      },
+      () => {
+        if (cancelled) throw Error("cancelled");
+      },
+      () => {},
+    ),
+    /cancelled/,
+  );
+  assert.equal(calls, 1);
+});
+
+test("transport exhaustion is not multiplied by batch validation or shrinking retries", async () => {
+  for (const status of [401, 503]) {
+    let calls = 0;
+    const delays = [];
+    await assert.rejects(
+      translateLatexProject(
+        threeParagraphs,
+        {
+          cacheKey: "transport-exhaustion",
+          translate: () =>
+            retryModelRequest(
+              async () => {
+                calls++;
+                throw modelRequestFailure(status);
+              },
+              async (delay) => delays.push(delay),
+              () => {},
+              () => {},
+            ),
+        },
+        {
+          read: async () => undefined,
+          write: async () => assert.fail("No valid translation"),
+        },
+        hash,
+        () => {},
+        () => {},
+      ),
+      new RegExp(`HTTP ${status}`),
+    );
+    assert.equal(calls, status === 401 ? 1 : 3);
+    assert.deepEqual(delays, status === 401 ? [] : [1000, 2000]);
+  }
+  assert.ok(modelRequestFailure(401) instanceof ModelRequestError);
+});
+
+test("failed envelopes shrink once by whole paragraphs and keep unique diagnostic attempts", async () => {
+  const calls = [],
+    records = [],
+    values = new Map();
+  const seen = new Map();
+  const result = await translateLatexProject(
+    threeParagraphs,
+    {
+      cacheKey: "shrink-envelope",
+      diagnostic: async (record) => records.push(record),
+      translate: async (text, feedback) => {
+        const { segments } = JSON.parse(text);
+        calls.push(segments);
+        const count = (seen.get(text) || 0) + 1;
+        seen.set(text, count);
+        if (segments.length > 2 || count === 1) return "invalid JSON";
+        // Feedback must describe only this child, never its sibling's IDs.
+        const requirements = JSON.parse(feedback.split("Requirements: ")[1]);
+        assert.deepEqual(
+          requirements.map((s) => s.id),
+          segments.map((s) => s.id),
+        );
+        return translate(text);
+      },
+    },
+    {
+      read: async (key) => values.get(key),
+      write: async (key, text) => values.set(key, text),
+    },
+    hash,
+    () => {},
+    () => {},
+  );
+  assert.deepEqual(
+    calls.map((segments) => segments.map((s) => s.id)),
+    [[1, 2, 3], [1, 2, 3], [1, 2], [1, 2], [3], [3]],
+  );
+  assert.deepEqual(
+    records.map((r) => r.attempt),
+    [1, 2, 3, 5],
+  );
+  assert.equal(result.requests, 6);
+  assert.equal(values.size, 3);
+  for (const segments of calls.slice(2))
+    for (const segment of segments)
+      assert.equal(
+        segment.text,
+        calls[0].find((s) => s.id === segment.id).text,
+      );
+  for (const formula of ["$x$", "$y$", "$z$"])
+    assert.ok(result.files.get("main.tex").includes(formula));
+});
+
+test("shrinking failed paragraphs keeps earlier valid translations out of all subsequent requests", async () => {
+  const values = new Map(),
+    ids = [];
+  const result = await translateLatexProject(
+    threeParagraphs,
+    {
+      cacheKey: "shrink-partial",
+      translate: async (text) => {
+        const segments = JSON.parse(text).segments;
+        ids.push(segments.map((s) => s.id));
+        if (segments.length === 1) return translate(text);
+        return mapBatch(translate(text), (value, id) =>
+          id === 1 ? value : "缺失保护标记",
+        );
+      },
+    },
+    {
+      read: async (key) => values.get(key),
+      write: async (key, value) => values.set(key, value),
+    },
+    hash,
+    () => {},
+    () => {},
+  );
+  assert.deepEqual(ids, [[1, 2, 3], [2, 3], [2], [3]]);
+  assert.equal(values.size, 3);
+  assert.equal(result.requested, 3);
+});
+
+test("unreadable and unwritable cache entries do not discard valid translations or trigger duplicate calls", async () => {
+  let calls = 0,
+    reads = 0,
+    writes = 0;
+  const updates = [];
+  const result = await translateLatexProject(
+    threeParagraphs,
+    {
+      cacheKey: "unavailable-cache",
+      translate: async (text) => {
+        calls++;
+        return translate(text);
+      },
+    },
+    {
+      read: async () => {
+        reads++;
+        throw Error("Cache damaged");
+      },
+      write: async () => {
+        writes++;
+        throw Error("Cache unavailable");
+      },
+    },
+    hash,
+    (text) => updates.push(text),
+    () => {},
+  );
+  assert.equal(calls, 1);
+  assert.equal(reads, 3);
+  assert.equal(writes, 3);
+  assert.equal(result.cacheHits, 0);
+  assert.ok(result.files.get("main.tex").includes("中文译文"));
+  assert.equal(updates.filter((s) => s.includes("无法读取")).length, 1);
+  assert.equal(updates.filter((s) => s.includes("无法写入")).length, 1);
+});
+
 test("API contract handles both protocols, rejects truncated output and keeps credentials out of bodies", () => {
   const config = {
     baseUrl: "https://example.test/v1/",
@@ -1251,6 +1844,8 @@ test("API contract handles both protocols, rejects truncated output and keeps cr
     key: "secret",
   };
   const chat = modelRequest(config, "text");
+  for (const invalid of [null, "not JSON", []])
+    assert.throws(() => modelResponse(config.protocol, invalid), /API JSON/);
   assert.throws(
     () => modelRequest({ ...config, baseUrl: "" }, "text"),
     /API 基础地址/,

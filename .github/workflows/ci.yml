@@ -40,6 +40,6 @@ jobs:
         with:
           name: zotero-hjfy-build
           path: |
-            .scaffold/build/*.xpi
-            .scaffold/build/update*.json
+            build/*.xpi
+            build/update*.json
           if-no-files-found: error

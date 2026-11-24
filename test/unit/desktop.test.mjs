@@ -8,18 +8,23 @@ import {
   writeFile,
   mkdir,
   copyFile,
+  rename,
+  access,
+  readdir,
   rm,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { gzipSync } from "fflate";
 
 const bundle = await build({
   stdin: {
     contents: `export { ArxivTranslationFactory } from './src/modules/arxivTranslation';
       export { DesktopTranslation } from './src/modules/desktopTranslation';
+      export { prepareDesktopSource } from './src/modules/desktopRuntime';
       export { LightweightTranslation } from './src/modules/lightweightTranslation';
       export { ensurePortableTex } from './src/modules/latex/portableTex';
       export { translationTaskSnapshot } from './src/modules/translationTasks';
@@ -37,6 +42,7 @@ const bundle = await build({
 const {
   ArxivTranslationFactory: Factory,
   DesktopTranslation,
+  prepareDesktopSource,
   LightweightTranslation,
   ensurePortableTex,
   translationTaskSnapshot,
@@ -49,6 +55,44 @@ const {
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`
 );
+
+test("desktop sources preserve template author definitions without hiding prose or examples", () => {
+  const authors = String.raw`Bowen Liu\textsuperscript{1,2,3,\textdaggerdbl}, Jianhan Ma\textsuperscript{3}`;
+  const definition = String.raw`\newcommand{\PaperAuthors}{${authors}}`;
+  const untouched = String.raw`% \newcommand{\PaperAuthors}{Comment example}
+\verb|\newcommand{\PaperAuthors}{Inline example}|
+\begin{verbatim}
+\newcommand{\PaperAuthors}{Code example}
+\end{verbatim}
+\newcommand{\PaperSubtitle}{Scaling World Action Models}
+\newcommand{\PaperAuthorNote}{Work completed during internships.}
+\newcommand{\PaperAuthors}[1]{#1}
+\newcommand{\PaperAbstract}{A complete scientific abstract.}`;
+  const source = `${definition}\n${untouched}`;
+  const prepared = prepareDesktopSource(source);
+  assert.equal(
+    prepared,
+    String.raw`\DeclareRobustCommand{\PaperAuthors}{${authors}}` +
+      `\n${untouched}`,
+  );
+  assert.equal(prepareDesktopSource(prepared), prepared);
+  assert.equal(
+    prepareDesktopSource(
+      String.raw`\newcommand* { \PaperAuthors } {${authors}}`,
+    ),
+    String.raw`\DeclareRobustCommand* { \PaperAuthors } {${authors}}`,
+  );
+  const main = prepareDesktopSource(
+    String.raw`\documentclass{article}` +
+      `\n${definition}\n` +
+      String.raw`\begin{document}A useful finding.\end{document}`,
+  );
+  assert.ok(main.includes(String.raw`\DeclareRobustCommand{\PaperAuthors}`));
+  assert.ok(
+    main.includes(String.raw`\PassOptionsToPackage{no-math}{fontspec}`),
+  );
+  assert.ok(main.includes("A useful finding."));
+});
 
 test("page-relative scrolling preserves progress across zoom and unequal page heights", () => {
   const source = [
@@ -576,6 +620,279 @@ test("successful imports remove their progress note and diagnostics while failur
   }
 });
 
+test("lightweight runtime retries HTTP safely, writes atomic cache and resumes without calling a model again", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "hjfy-lite-runtime-"));
+  const globals = Object.fromEntries(
+    [
+      "Zotero",
+      "Services",
+      "PathUtils",
+      "IOUtils",
+      "Cc",
+      "Ci",
+      "ChromeUtils",
+    ].map((key) => [key, globalThis[key]]),
+  );
+  const originalCompiler = LightweightTranslation.runCompiler;
+  const compiler = path.join(root, "fixture-tectonic.exe");
+  const source = String.raw`\pdfoutput=1
+\documentclass{article}\begin{document}
+First useful result $x$ and \cite{fixture2026}.
+
+Second useful result $y$.
+\bibliographystyle{plain}
+\bibliography{missing-references}
+\end{document}`;
+  const bibliography = String.raw`\begin{thebibliography}{1}
+\bibitem{fixture2026} Fixture author. Fixture title. 2026.
+\end{thebibliography}`;
+  let calls = 0,
+    serial = 0,
+    status = 429,
+    model = "fixture-model",
+    compilerOutcome = "stop",
+    bibliographyMode = "traditional",
+    preflightFailure = true,
+    useLocal = false;
+  const temporaryPaths = [],
+    delays = [],
+    updates = [];
+  try {
+    await writeFile(compiler, "Fixture only; never executed");
+    globalThis.PathUtils = {
+      profileDir: root,
+      join: path.join,
+      parent: path.dirname,
+      filename: path.basename,
+      isAbsolute: path.isAbsolute,
+    };
+    globalThis.IOUtils = {
+      makeDirectory: (name) => mkdir(name, { recursive: true }),
+      exists: async (name) =>
+        access(name).then(
+          () => true,
+          () => false,
+        ),
+      stat: async (name) => ({ size: (await readFile(name)).length }),
+      read: (name) => readFile(name),
+      readUTF8: (name) => readFile(name, "utf8"),
+      write: (name, data) => writeFile(name, data),
+      writeJSON: (name, data) => writeFile(name, JSON.stringify(data)),
+      remove: (name) => rm(name, { force: true }),
+      writeUTF8: async (name, text, options) => {
+        if (!options?.tmpPath) return writeFile(name, text);
+        assert.equal(options.flush, true);
+        temporaryPaths.push(options.tmpPath);
+        await writeFile(options.tmpPath, text);
+        await rename(options.tmpPath, name);
+      },
+    };
+    globalThis.Ci = { nsICryptoHash: {} };
+    globalThis.Cc = {
+      "@mozilla.org/security/hash;1": {
+        createInstance: () => {
+          const digest = createHash("sha256");
+          return {
+            SHA256: 1,
+            init: () => {},
+            update: (bytes) => digest.update(bytes),
+            finish: () => digest.digest("latin1"),
+          };
+        },
+      },
+    };
+    globalThis.Services = {
+      logins: { findLogins: () => [{ password: "fixture-secret" }] },
+      env: { get: () => "" },
+    };
+    globalThis.Zotero = {
+      Prefs: {
+        get: (key) =>
+          key.endsWith("tectonicPath")
+            ? useLocal
+              ? ""
+              : compiler
+            : key.endsWith("baseUrl")
+              ? "http://127.0.0.1/v1"
+              : key.endsWith("model")
+                ? model
+                : "",
+      },
+      Utilities: { randomString: () => String(++serial) },
+      Promise: { delay: async (milliseconds) => delays.push(milliseconds) },
+      File: {
+        download: async (_url, destination) =>
+          writeFile(
+            destination,
+            Buffer.concat([
+              tarEntry("main.tex", source),
+              ...(bibliographyMode === "missing"
+                ? []
+                : [
+                    tarEntry(
+                      "main.bbl",
+                      bibliographyMode === "traditional"
+                        ? bibliography
+                        : String.raw`\refsection{0}\datalist[entry]{none}\enddatalist`,
+                    ),
+                  ]),
+            ]),
+          ),
+      },
+      HTTP: {
+        request: async (_method, _url, options) => {
+          calls++;
+          options.requestObserver({ status, getResponseHeader: () => "1" });
+          if (status !== 200) {
+            const failed = status;
+            if (status === 429) status = 200;
+            throw {
+              status: failed,
+              message: "fixture-secret",
+              responseText: "fixture-secret",
+            };
+          }
+          const segments = JSON.parse(
+            JSON.parse(options.body).messages[1].content,
+          ).segments;
+          const content = JSON.stringify({
+            segments: segments.map((s) => ({
+              id: s.id,
+              text: "译文" + (s.text.match(/\[\[HJFY_\d+\]\]/g) || []).join(""),
+            })),
+          });
+          return {
+            responseText: JSON.stringify({
+              choices: [{ finish_reason: "stop", message: { content } }],
+            }),
+          };
+        },
+      },
+    };
+    const discovered = [];
+    globalThis.ChromeUtils = {
+      importESModule: () => ({
+        Subprocess: {
+          pathSearch: async (name) => {
+            discovered.push(name);
+            return path.join(root, `${name}.exe`);
+          },
+        },
+      }),
+    };
+    LightweightTranslation.runCompiler = async (command, args) => {
+      if (args.at(-1).endsWith("tex-probe.tex")) return;
+      if (args.includes("xdv") || args.includes("-xdv")) {
+        const source = await readFile(args.at(-1), "utf8");
+        assert.ok(source.includes("First useful result"));
+        assert.ok(source.includes("\\usepackage[UTF8,fontset=fandol]{ctex}"));
+        assert.ok(!source.includes("\\pdfoutput=1"));
+        if (preflightFailure) throw Error("File `wrapstuff.sty' not found.");
+        return;
+      }
+      if (useLocal) {
+        assert.equal(command, path.join(root, "latexmk.exe"));
+        assert.ok(args.includes("-norc"));
+        assert.ok(args.includes("-no-shell-escape"));
+      }
+      const main = await readFile(args.at(-1), "utf8");
+      assert.ok(!main.includes("\\pdfoutput=1"));
+      assert.ok(
+        main.indexOf("\\PassOptionsToPackage{no-math}{fontspec}") <
+          main.indexOf("\\usepackage[UTF8,fontset=fandol]{ctex}"),
+      );
+      assert.ok(main.includes("\\RequirePackage{xeCJKfntef}"));
+      assert.ok(main.includes("译文$x$"));
+      assert.ok(main.includes("\\cite{fixture2026}"));
+      if (bibliographyMode === "traditional") {
+        assert.ok(main.includes("\\input{\\jobname.bbl}"));
+        assert.ok(!main.includes("\\bibliography{"));
+        assert.ok(!main.includes("\\bibliographystyle{"));
+        assert.equal(
+          await readFile(
+            path.join(path.dirname(args.at(-1)), "main.bbl"),
+            "utf8",
+          ),
+          bibliography,
+        );
+      } else {
+        assert.ok(!main.includes("\\input{\\jobname.bbl}"));
+        assert.ok(main.includes("\\bibliography{missing-references}"));
+        assert.ok(main.includes("\\bibliographystyle{plain}"));
+      }
+      if (compilerOutcome === "unresolved") {
+        await writeFile(
+          path.join(args[args.indexOf("--outdir") + 1], "main.log"),
+          "Package natbib Warning: There were undefined citations.",
+        );
+        return;
+      }
+      throw Error("Stopped before PDF compilation");
+    };
+    const run = () =>
+      LightweightTranslation.translate("2610.34593v1", (text) =>
+        updates.push(text),
+      );
+    await assert.rejects(run(), /全文编译预检未通过，尚未调用模型/);
+    assert.equal(
+      calls,
+      0,
+      "Missing project dependencies must fail before any paid request",
+    );
+    preflightFailure = false;
+    await assert.rejects(run(), /Stopped before PDF compilation/);
+    assert.equal(calls, 2);
+    assert.deepEqual(delays, [250, 250, 250, 250]);
+    assert.equal(temporaryPaths.length, 2);
+    assert.equal(new Set(temporaryPaths).size, 2);
+    const cache = path.join(root, "hjfy-lightweight", "translations");
+    assert.ok((await readdir(cache)).every((name) => name.endsWith(".txt")));
+    await assert.rejects(run(), /Stopped before PDF compilation/);
+    assert.equal(calls, 2, "A new task must reuse the atomic cache");
+    compilerOutcome = "unresolved";
+    await assert.rejects(run(), /未解析的文献引用或交叉引用/);
+    assert.equal(
+      calls,
+      2,
+      "Unresolved references must be checked even when all text is cached",
+    );
+    compilerOutcome = "stop";
+    for (bibliographyMode of ["missing", "biblatex"]) {
+      await assert.rejects(run(), /Stopped before PDF compilation/);
+      assert.equal(calls, 2);
+    }
+    model = "fixture-401";
+    status = 401;
+    await assert.rejects(run(), (error) => {
+      assert.match(error.message, /HTTP 401/);
+      assert.ok(!error.message.includes("fixture-secret"));
+      return true;
+    });
+    assert.equal(
+      calls,
+      3,
+      "Authentication errors must not be retried or split",
+    );
+    assert.equal(LightweightTranslation.requests.size, 0);
+    assert.ok(!updates.join("\n").includes("fixture-secret"));
+    useLocal = true;
+    model = "fixture-model";
+    status = 200;
+    await assert.rejects(run(), /Stopped before PDF compilation/);
+    assert.deepEqual(discovered.sort(), [
+      "bibtex",
+      "kpsewhich",
+      "latexmk",
+      "xelatex",
+    ]);
+    assert.equal(calls, 3, "Changing compiler must reuse valid translations");
+  } finally {
+    LightweightTranslation.runCompiler = originalCompiler;
+    for (const [key, value] of Object.entries(globals)) globalThis[key] = value;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("concurrent portable TeX preparation shares one initialization and can retry after failure", async () => {
   let reads = 0;
   const gate = deferred();
@@ -618,6 +935,7 @@ test("concurrent portable TeX preparation shares one initialization and can retr
 });
 
 test("portable compilers serialize shared cache access and cancelled queued jobs never launch", async () => {
+  globalThis.PathUtils = { filename: path.basename };
   const gate = deferred();
   let launches = 0,
     cancelled = false;
@@ -665,6 +983,52 @@ test("portable compilers serialize shared cache access and cancelled queued jobs
   await first;
   await rejected;
   assert.equal(launches, 1);
+});
+
+test("cancelling local compilation stops latexmk and its TeX children", async () => {
+  const gate = deferred();
+  const launches = [];
+  globalThis.PathUtils = { filename: path.basename, join: path.join };
+  globalThis.Services = { env: { get: () => "C:/Windows" } };
+  globalThis.Zotero = { isWin: true };
+  globalThis.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: {
+        call: async (options) => {
+          launches.push(options);
+          if (options.command.endsWith("taskkill.exe")) {
+            gate.resolve();
+            return { wait: async () => ({ exitCode: 0 }) };
+          }
+          return {
+            pid: 1234,
+            stdin: { close: async () => {} },
+            stdout: { readString: async () => "" },
+            stderr: { readString: async () => "" },
+            wait: async () => {
+              await gate.promise;
+              return { exitCode: 1 };
+            },
+          };
+        },
+      },
+    }),
+  };
+  const running = LightweightTranslation.runCompiler(
+    "C:/TeX/latexmk.exe",
+    [],
+    "local-job",
+    "cache",
+    () => {},
+    () => {},
+  );
+  const rejected = assert.rejects(running, /本机 TeX 编译失败/);
+  await tick();
+  await LightweightTranslation.cancelAll();
+  await rejected;
+  assert.deepEqual(launches[1].arguments, ["/PID", "1234", "/T", "/F"]);
+  assert.equal(LightweightTranslation.processes.size, 0);
+  assert.equal(LightweightTranslation.localProcesses.size, 0);
 });
 
 test("existing translations open beside the available original and fall back to a single reader", async () => {

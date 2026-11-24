@@ -1,9 +1,12 @@
 import { defineConfig } from "zotero-plugin-scaffold";
 import pkg from "./package.json";
 
+const buildDirectory = "build";
+
 export default defineConfig({
   source: ["src", "addon"],
-  dist: ".scaffold/build",
+  dist: buildDirectory,
+  xpiName: `zotero-hjfy-desktop-${pkg.version}`,
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
@@ -11,7 +14,7 @@ export default defineConfig({
     pkg.version.includes("-") ? "update-beta.json" : "update.json"
   }`,
   xpiDownloadLink:
-    "https://github.com/{{owner}}/{{repo}}/releases/download/v{{version}}/{{xpiName}}.xpi",
+    "https://github.com/{{owner}}/{{repo}}/releases/download/{{version}}/{{xpiName}}.xpi",
 
   build: {
     assets: ["addon/**/*.*"],
@@ -34,15 +37,18 @@ export default defineConfig({
         },
         bundle: true,
         target: "firefox115",
-        outfile: `.scaffold/build/addon/content/scripts/${pkg.config.addonRef}.js`,
+        outfile: `${buildDirectory}/addon/content/scripts/${pkg.config.addonRef}.js`,
       },
     ],
+  },
+
+  release: {
+    bumpp: {
+      tag: "%s",
+    },
   },
 
   test: {
     waitForPlugin: `() => Zotero.${pkg.config.addonInstance}.data.initialized`,
   },
-
-  // If you need to see a more detailed log, uncomment the following line:
-  // logLevel: "trace",
 });

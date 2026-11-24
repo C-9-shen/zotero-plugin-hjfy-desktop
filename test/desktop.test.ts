@@ -10,30 +10,6 @@ import { readSourceArchive } from "../src/utils/sourceArchive";
 describe("desktop runtime without shell scripts", function () {
   this.timeout(240000);
 
-  before(function () {
-    for (const test of (this as any).test.parent.tests) {
-      const run = test.fn;
-      test.fn = async function (this: any) {
-        try {
-          return await run.call(this);
-        } catch (error) {
-          await IOUtils.writeJSON(
-            PathUtils.join(
-              PathUtils.profileDir,
-              `native-error-${test.title.slice(0, 8)}.json`,
-            ),
-            {
-              error: String(error),
-              message: (error as any)?.message,
-              stack: (error as any)?.stack,
-            },
-          );
-          throw new Error(String(error));
-        }
-      };
-    }
-  });
-
   afterEach(async function () {
     const error = (this.currentTest as any)?.err;
     if (error) {
@@ -181,12 +157,6 @@ describe("desktop runtime without shell scripts", function () {
         PathUtils.join(PathUtils.profileDir, "hjfy-native-test-result.json"),
         { job, attachment: attachment.attachmentFilename, launches },
       );
-    } catch (error) {
-      await IOUtils.writeJSON(
-        PathUtils.join(PathUtils.profileDir, "hjfy-smoke-error.json"),
-        { error: String(error), stack: (error as Error).stack },
-      );
-      throw error;
     } finally {
       Zotero.File.download = originalDownload;
       (DesktopTranslation as any).prepareTask = originalPrepare;

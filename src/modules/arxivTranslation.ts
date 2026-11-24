@@ -273,34 +273,4 @@ export class ArxivTranslationFactory {
 
     return null;
   }
-
-  /**
-   * 检查条目是否包含 arXiv ID（从任何来源）
-   */
-  static hasArxivDOI(item: Zotero.Item): boolean {
-    return this.extractArxivIdFromItem(item) !== null;
-  }
-
-  /**
-   * 批量翻译功能
-   */
-  static async batchTranslate() {
-    const items = ztoolkit.getGlobal("ZoteroPane").getSelectedItems();
-    const arxivItems = items.filter((item: Zotero.Item) =>
-      this.hasArxivDOI(item),
-    );
-
-    if (arxivItems.length === 0) {
-      new ztoolkit.ProgressWindow(getString("menuitem-label"))
-        .createLine({
-          text: "未找到包含 arXiv DOI 的条目",
-          type: "warning",
-        })
-        .show()
-        .startCloseTimer(3000);
-      return;
-    }
-
-    await this.translateSelectedItems(arxivItems);
-  }
 }

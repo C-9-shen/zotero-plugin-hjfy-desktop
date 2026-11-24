@@ -24,9 +24,10 @@
   >
   <html:h3>精简实现配置</html:h3>
   <html:p
-    >不需要安装幻觉翻译桌面端。使用自己的模型 API；首次自动下载 Tectonic 和所需
-    TeX
-    资源，后续复用缓存。仅翻译正文、标题等文本，表格内容、公式、代码和参考文献保持原样。复杂模板可能无法编译。</html:p
+    >不需要安装幻觉翻译桌面端。使用自己的模型 API；优先使用已安装的本机
+    TeX，否则下载便携 Tectonic
+    和所需资源。缺包或内核过旧时自动下载兼容环境及宏包，后续复用缓存。翻译前检查整篇论文的编译依赖。
+    仅翻译正文、标题等文本，表格内容、公式、代码和参考文献保持原样。复杂模板可能无法编译。</html:p
   >
   <label value="API 基础地址（包含 /v1，例如 https://服务地址/v1）" />
   <html:input
@@ -49,7 +50,7 @@
     label="设置或删除 API 密钥…"
     oncommand="Zotero.HjfyArxiv.hooks.configureLightweightKey(window)"
   />
-  <label value="Tectonic 程序路径（留空自动下载 Windows x64 版）" />
+  <label value="Tectonic 程序路径（填写则先使用；留空优先本机 TeX）" />
   <html:input
     type="text"
     preference="extensions.zotero.hjfyarxiv.lightweight.tectonicPath"

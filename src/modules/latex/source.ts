@@ -67,6 +67,14 @@ export function stripLatexComments(source: string): string {
   );
 }
 
+/** Mask examples and generated files while retaining source offsets. */
+export function maskLatexExamples(source: string): string {
+  return stripLatexComments(source).replace(
+    /\\begin\s*\{(verbatim\*?|Verbatim|lstlisting|minted|filecontents\*?|comment)\}[\s\S]*?\\end\s*\{\1\}/g,
+    (text) => text.replace(/[^\r\n]/g, " "),
+  );
+}
+
 export function findMainFile(
   files: Map<string, string>,
   configured = "",
@@ -327,6 +335,14 @@ export function normalizeLatexMarkers(text: string): string {
     .replace(/`(\[\[HJFY_\d+\]\])`/g, "$1");
 }
 
+/** Terminate a control word only at a known splice boundary (not in user TeX). */
+function joinLatex(left: string, right: string): string {
+  return /(?:^|[^\\])(?:\\\\)*\\[a-zA-Z@]+$/.test(left) &&
+    /^[\p{L}\p{M}]/u.test(right)
+    ? left + " " + right
+    : left + right;
+}
+
 export function restoreLatex(unit: LatexUnit, translated: string): string {
   if (typeof translated !== "string" || !translated.trim())
     throw new Error("模型返回空译文。");
@@ -345,20 +361,27 @@ export function restoreLatex(unit: LatexUnit, translated: string): string {
   const prose = translated.replace(/\[\[HJFY_\d+\]\]/g, "");
   if (unit.text.replace(/\[\[HJFY_\d+\]\]/g, "").trim() && !prose.trim())
     throw new Error("模型返回空译文。");
-  if (/[\\{}$%&#_^~]|\[\[HJFY_|```/.test(prose))
+  // Literal prose punctuation (e.g. a model translating "half" as "50%")
+  // is escaped below. Accept existing escapes without escaping them twice.
+  const syntax = translated.replace(/\[\[HJFY_\d+\]\]|\\[%&#_]|[%&#_]/g, "");
+  if (/[\\{}$^~]/.test(syntax) || /\[\[HJFY_|```/.test(prose))
     throw new Error("模型在译文中引入了未转义的 TeX 语法。");
-  return translated.replace(
-    /\[\[HJFY_(\d+)\]\]/g,
-    (marker, index, offset: number) => {
-      const protectedText = unit.protected[Number(index)];
-      // XeTeX treats CJK letters as part of a control word. A model may remove
-      // the whitespace after a marker, merging e.g. \\modelname with Chinese.
-      const next = translated.slice(offset + marker.length);
-      return /\\[a-zA-Z@]+$/.test(protectedText) && /^[\p{L}\p{M}]/u.test(next)
-        ? `${protectedText} `
-        : protectedText;
-    },
-  );
+  let restored = "";
+  let end = 0;
+  for (const match of translated.matchAll(
+    /\[\[HJFY_(\d+)\]\]|\\[%&#_]|[%&#_]/g,
+  )) {
+    restored = joinLatex(restored, translated.slice(end, match.index));
+    const part =
+      match[1] === undefined
+        ? match[0].startsWith("\\")
+          ? match[0]
+          : `\\${match[0]}`
+        : unit.protected[Number(match[1])];
+    restored = joinLatex(restored, part);
+    end = match.index + match[0].length;
+  }
+  return joinLatex(restored, translated.slice(end));
 }
 
 export function applyLatexUnits(
@@ -369,10 +392,13 @@ export function applyLatexUnits(
   if (translations.length !== units.length)
     throw new Error("译文段落数量不匹配。");
   for (let i = units.length - 1; i >= 0; i--) {
-    source =
-      source.slice(0, units[i].start) +
-      restoreLatex(units[i], translations[i]) +
-      source.slice(units[i].end);
+    source = joinLatex(
+      joinLatex(
+        source.slice(0, units[i].start),
+        restoreLatex(units[i], translations[i]),
+      ),
+      source.slice(units[i].end),
+    );
   }
   return source;
 }

@@ -16,8 +16,6 @@ class Addon {
   };
   // Lifecycle hooks
   public hooks: typeof hooks;
-  // APIs
-  public api: object;
 
   constructor() {
     this.data = {
@@ -28,7 +26,6 @@ class Addon {
       ztoolkit: createZToolkit(),
     };
     this.hooks = hooks;
-    this.api = {};
   }
 }
 
