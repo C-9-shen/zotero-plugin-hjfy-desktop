@@ -12,9 +12,12 @@ export class LatexMarkerError extends Error {
   }
 }
 
+// Some document classes collect these fields before \begin{document}.
+const FRONT_MATTER_COMMANDS = new Set(["title", "subtitle", "abstract"]);
+
 // Keep texttt opaque: filenames, dataset keys and code must remain verbatim.
 const BLOCK_TEXT_COMMANDS = new Set(
-  "title subtitle section subsection subsubsection paragraph subparagraph chapter part caption subcaption abstract keywords".split(
+  "title subtitle section subsection subsubsection paragraph subparagraph chapter part caption captionof subcaption abstract keywords".split(
     " ",
   ),
 );
@@ -43,6 +46,8 @@ function groupEnd(source: string, start: number): number {
     else if (source[i] === "%") {
       const end = source.indexOf("\n", i);
       i = end < 0 ? source.length : end;
+    } else if (open === "[" && source[i] === "{") {
+      i = groupEnd(source, i) - 1;
     } else if (source[i] === open) depth++;
     else if (source[i] === close && --depth === 0) return i + 1;
   }
@@ -148,6 +153,7 @@ export function planLatex(
     protectedParts = [];
   };
   const scan = (from: number, to: number, active: boolean, inline = false) => {
+    let inPreambleAbstract = false;
     for (let i = from; i < to; ) {
       const char = source[i];
       if (char === "%") {
@@ -216,8 +222,17 @@ export function planLatex(
           const textCommand =
             BLOCK_TEXT_COMMANDS.has(command.name) ||
             INLINE_TEXT_COMMANDS.has(command.name);
-          const singleArgument =
-            textCommand || ["input", "include", "end"].includes(command.name);
+          // fancyreport stores the teaser caption in [] and the artwork in {}.
+          const teaser = command.name === "teaser";
+          const argumentLimit =
+            command.name === "captionof"
+              ? 2
+              : textCommand ||
+                  teaser ||
+                  ["input", "include", "end"].includes(command.name)
+                ? 1
+                : Infinity;
+          let bracedArguments = 0;
           for (;;) {
             if (command.name === "par") break;
             const next = /^\s*/.exec(source.slice(end))![0].length + end;
@@ -232,12 +247,14 @@ export function planLatex(
             groups.push(group);
             end = group.end;
             if (
-              (singleArgument && group.open === "{") ||
+              (group.open === "{" && ++bracedArguments === argumentLimit) ||
               command.name === "item"
             )
               break;
           }
-          const argument = groups.find((group) => group.open === "{");
+          const argument = groups.filter((group) => group.open === "{")[
+            command.name === "captionof" ? 1 : 0
+          ];
           const value = argument
             ? source.slice(argument.start + 1, argument.end - 1)
             : "";
@@ -266,10 +283,28 @@ export function planLatex(
             i = end;
             continue;
           } else if (
+            !inline &&
+            value === "abstract" &&
+            ((!active && command.name === "begin") ||
+              (inPreambleAbstract && command.name === "end"))
+          ) {
+            flush(i);
+            start = end;
+            inPreambleAbstract = command.name === "begin";
+            active = inPreambleAbstract;
+            i = end;
+            continue;
+          } else if (
             (command.name === "input" || command.name === "include") &&
             argument
           ) {
-            inputs.push({ path: value.trim(), body: active });
+            const path = value.trim();
+            // This pdfTeX glyph map is removed from the XeTeX compile copy.
+            if (
+              command.name !== "input" ||
+              !/^glyphtounicode(?:\.tex)?$/.test(path)
+            )
+              inputs.push({ path, body: active });
             if (!inline) {
               flush(i);
               start = end;
@@ -278,10 +313,19 @@ export function planLatex(
             }
           } else if (command.name === "input" || command.name === "include") {
             throw new Error("轻量后端要求 input/include 使用花括号参数。");
+          } else if (teaser && groups[0]?.open === "[" && argument && !inline) {
+            const caption = groups[0];
+            flush(i);
+            start = caption.start + 1;
+            scan(start, caption.end - 1, true, true);
+            flush(caption.end - 1);
+            start = end;
+            i = end;
+            continue;
           } else if (
             textCommand &&
             argument &&
-            (active || command.name === "title" || command.name === "subtitle")
+            (active || FRONT_MATTER_COMMANDS.has(command.name))
           ) {
             if (INLINE_TEXT_COMMANDS.has(command.name) || inline) {
               // Keep inline prose in its paragraph while protecting the command,

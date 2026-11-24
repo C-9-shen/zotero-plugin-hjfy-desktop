@@ -11,6 +11,8 @@ declare namespace _ZoteroTypes {
       "desktop.dataDirectory": string;
       "desktop.modelName": string;
       "translation.backend": string;
+      "pdf.backend": string;
+      "pdf.pythonPath": string;
       "lightweight.baseUrl": string;
       "lightweight.model": string;
       "lightweight.protocol": string;

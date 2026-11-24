@@ -22,7 +22,18 @@
     >选择会自动保存，从下一次翻译任务生效，无需重启
     Zotero。请在下方配置所选方式；已有译文仍直接打开分屏。</html:p
   >
-  <html:h3>精简实现配置</html:h3>
+  <html:h3>PDF 翻译配置</html:h3>
+  <label value="PDF 翻译后端" />
+  <html:select preference="extensions.zotero.hjfyarxiv.pdf.backend">
+    <html:option value="desktop">幻觉翻译桌面端（默认）</html:option>
+    <html:option value="babeldoc">独立 PDF 后端（BabelDOC）</html:option>
+  </html:select>
+  <label value="已安装 BabelDOC 的 python.exe 绝对路径" />
+  <html:input
+    type="text"
+    preference="extensions.zotero.hjfyarxiv.pdf.pythonPath"
+  />
+  <html:h3>精简实现与独立 PDF 的模型配置</html:h3>
   <html:p
     >不需要安装幻觉翻译桌面端。使用自己的模型 API；优先使用已安装的本机
     TeX，否则下载便携 Tectonic

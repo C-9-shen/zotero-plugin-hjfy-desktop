@@ -26,6 +26,7 @@ const bundle = await build({
       export { DesktopTranslation } from './src/modules/desktopTranslation';
       export { prepareDesktopSource } from './src/modules/desktopRuntime';
       export { LightweightTranslation } from './src/modules/lightweightTranslation';
+      export { PdfTranslation } from './src/modules/pdfTranslation';
       export { ensurePortableTex } from './src/modules/latex/portableTex';
       export { translationTaskSnapshot } from './src/modules/translationTasks';
       export { openTranslationReaders } from './src/modules/translationReader';
@@ -44,6 +45,7 @@ const {
   DesktopTranslation,
   prepareDesktopSource,
   LightweightTranslation,
+  PdfTranslation,
   ensurePortableTex,
   translationTaskSnapshot,
   openTranslationReaders,
@@ -235,6 +237,18 @@ test("desktop adapter handles split UTF-8 JSONL, validates outputs and rejects f
   let terminated = 0;
   const launches = [];
   const originalPrepare = DesktopTranslation.prepareTask;
+  const originalPdfPrepare = DesktopTranslation.preparePdfTask;
+  DesktopTranslation.preparePdfTask = async (input) => {
+    assert.equal(input, path.join(directory, "local source.pdf"));
+    return {
+      command: path.join(directory, "hjfy-pdf.exe"),
+      arguments: [input, "--output", pdf, "--on-page-error", "keep-original"],
+      outputPdf: pdf,
+      environment: { HJFY_PLUGIN_API_KEY: "secret-fixture" },
+      environmentAppend: true,
+      stderr: "pipe",
+    };
+  };
   DesktopTranslation.prepareTask = async (arxivId) => {
     submitted = arxivId;
     return {
@@ -262,7 +276,8 @@ test("desktop adapter handles split UTF-8 JSONL, validates outputs and rejects f
             terminated++;
             return { wait: async () => ({ exitCode: 0 }) };
           }
-          assert.ok(options.command.endsWith("hjfy-office.exe"));
+          assert.match(options.command, /hjfy-(office|pdf)\.exe$/);
+          assert.equal(options.outputPdf, undefined);
           assert.ok(path.isAbsolute(options.command));
           assert.equal(
             options.environment.HJFY_PLUGIN_API_KEY,
@@ -274,14 +289,23 @@ test("desktop adapter handles split UTF-8 JSONL, validates outputs and rejects f
             events.slice(7, 29),
             events.slice(29),
           ];
+          let stdinClosed = false;
           return {
             pid: 123,
             stdin: {
-              close: async () => {},
+              close: async () => {
+                stdinClosed = true;
+              },
             },
             stdout: { readString: async () => chunks.shift() || "" },
             stderr: { readString: async () => "" },
-            wait: async () => ({ exitCode }),
+            wait: async () => {
+              assert.equal(
+                stdinClosed,
+                options.command.endsWith("hjfy-office.exe"),
+              );
+              return { exitCode };
+            },
           };
         },
       },
@@ -318,6 +342,24 @@ test("desktop adapter handles split UTF-8 JSONL, validates outputs and rejects f
       DesktopTranslation.translate("2610.34593v1", () => {}),
       /未生成/,
     );
+    const pdfSuccess = events;
+    events = `${JSON.stringify({ type: "document_finished", content: { translated: 0 } })}\n${pdfSuccess}`;
+    await assert.rejects(
+      DesktopTranslation.translatePdf(
+        path.join(directory, "local source.pdf"),
+        () => {},
+      ),
+      /未翻译任何内容/,
+    );
+    events = `${JSON.stringify({ type: "document_finished", content: { translated: 25 } })}\n${pdfSuccess}`;
+    assert.equal(
+      await DesktopTranslation.translatePdf(
+        path.join(directory, "local source.pdf"),
+        () => {},
+      ),
+      pdf,
+    );
+    assert.ok(launches.at(-1).command.endsWith("hjfy-pdf.exe"));
     events = `${JSON.stringify({ type: "run_finished", outcome: "succeeded", output_pdf: pdf })}\n`;
     await writeFile(pdf, "<html>error</html>");
     await assert.rejects(
@@ -326,6 +368,7 @@ test("desktop adapter handles split UTF-8 JSONL, validates outputs and rejects f
     );
   } finally {
     DesktopTranslation.prepareTask = originalPrepare;
+    DesktopTranslation.preparePdfTask = originalPdfPrepare;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -469,6 +512,80 @@ test("batch translation continues after failures without opening progress notifi
     assert.equal(errors.length, 1);
   } finally {
     Factory.translateSingleItem = originalTranslate;
+  }
+});
+
+test("translation menu opens readers directly and shows the task list once for a mixed selection", async () => {
+  const translated = {
+    id: 750,
+    attachmentFilename: "Paper_hjfy_arxiv_2610.34593v1.pdf",
+    fileExists: async () => true,
+  };
+  const item = (id, attachments) => ({
+    id,
+    libraryID: 910,
+    isRegularItem: () => true,
+    getDisplayTitle: () => "Paper",
+    getField: (name) =>
+      name === "url" ? "https://arxiv.org/abs/2610.34593v1" : "",
+    getAttachments: () => attachments,
+    getBestAttachment: async () => translated,
+  });
+  const existing = item(751, [750]);
+  const pending = [item(752, []), item(753, [])];
+  let selected = [existing];
+  let command;
+  let taskLists = 0;
+  const read = [];
+  const queued = [];
+  globalThis.addon = { data: { alive: true, config: { addonRef: "test" } } };
+  globalThis.Zotero = {
+    Items: { get: () => translated },
+    Reader: { open: async (id) => read.push(id) },
+  };
+  globalThis.ztoolkit = {
+    Menu: {
+      register: (_menu, entry) => {
+        command = entry.commandListener;
+      },
+    },
+    getGlobal: () => ({ getSelectedItems: () => selected }),
+    Dialog: class {
+      addCell() {
+        return this;
+      }
+      addButton() {
+        return this;
+      }
+      setDialogData() {
+        return this;
+      }
+      open() {
+        taskLists++;
+        return this;
+      }
+    },
+    log: () => assert.fail("Menu command unexpectedly failed"),
+  };
+  const original = Factory.translateItem;
+  Factory.translateItem = async (selectedItem) => {
+    queued.push(selectedItem.id);
+  };
+  try {
+    Factory.registerRightClickMenuItem();
+    await command();
+    await tick();
+    assert.deepEqual(read, [750]);
+    assert.equal(taskLists, 0);
+    assert.deepEqual(queued, []);
+
+    selected = [...pending, existing];
+    await command();
+    assert.deepEqual(read, [750, 750]);
+    assert.equal(taskLists, 1);
+    assert.deepEqual(queued, [752, 753]);
+  } finally {
+    Factory.translateItem = original;
   }
 });
 
@@ -616,6 +733,113 @@ test("successful imports remove their progress note and diagnostics while failur
   } finally {
     LightweightTranslation.translate = originalTranslate;
     LightweightTranslation.cleanup = originalCleanup;
+    Factory.savePdfAsAttachment = originalSave;
+  }
+});
+
+test("alphaXiv slug routes a local original PDF through the desktop engine", async () => {
+  const originalTranslatePdf = DesktopTranslation.translatePdf;
+  const originalBabelTranslate = PdfTranslation.translate;
+  const originalBabelCleanup = PdfTranslation.cleanup;
+  const originalCleanup = DesktopTranslation.cleanup;
+  const originalSave = Factory.savePdfAsAttachment;
+  const input = path.resolve("paper with spaces.pdf");
+  const attachment = {
+    key: "SOURCE01",
+    id: 1,
+    attachmentFilename: "original.pdf",
+    attachmentContentType: "application/pdf",
+    fileExists: async () => true,
+    getFilePathAsync: async () => input,
+    getField: () => "Original",
+  };
+  let source = attachment;
+  const fields = {
+    url: "https://www.alphaxiv.org/abs/2611.jepa-latent-maps-content-geometry",
+    DOI: "10.5281/zenodo.24356797",
+    archiveID: "2611.jepa-latent-maps-content-geometry",
+  };
+  const item = {
+    id: 501,
+    libraryID: 909,
+    isRegularItem: () => true,
+    getDisplayTitle: () => "JEPA paper",
+    getBestAttachment: async () => source,
+    getAttachments: () => (source ? [source.id] : []),
+    getField: (name) => fields[name] || "",
+  };
+  const events = [];
+  let pdfBackend = "desktop";
+  globalThis.addon = { data: { alive: true } };
+  globalThis.ChromeUtils = {
+    importESModule: () => ({ setTimeout, clearTimeout }),
+  };
+  globalThis.Zotero = {
+    Prefs: {
+      get: (key) => (key.endsWith(".pdf.backend") ? pdfBackend : "lightweight"),
+    },
+    Items: { get: () => source },
+    logError: (error) => {
+      throw error;
+    },
+    Item: class {
+      setNote() {}
+      async saveTx() {
+        this.id = 99;
+      }
+      async eraseTx() {}
+    },
+  };
+  DesktopTranslation.translatePdf = async (file) => {
+    assert.equal(file, input);
+    events.push("desktop-pdf");
+    return "output.pdf";
+  };
+  DesktopTranslation.cleanup = async (output) => {
+    assert.equal(output, "output.pdf");
+    events.push("cleanup");
+  };
+  PdfTranslation.translate = async (file) => {
+    assert.equal(file, input);
+    events.push("babeldoc-pdf");
+    return "output.pdf";
+  };
+  PdfTranslation.cleanup = async () => {
+    events.push("babeldoc-cleanup");
+  };
+  Factory.savePdfAsAttachment = async (_item, output, id, kind) => {
+    assert.equal(output, "output.pdf");
+    assert.equal(
+      Factory.getTranslationAttachmentFilename(item, id, kind),
+      "JEPA paper_hjfy_pdf_SOURCE01.pdf",
+    );
+    events.push("import");
+    return { id: 2 };
+  };
+  try {
+    assert.equal(Factory.extractArxivIdFromItem(item), null);
+    assert.deepEqual(await Factory.translateSingleItem(item), { id: 2 });
+    assert.deepEqual(events, ["desktop-pdf", "import", "cleanup"]);
+    pdfBackend = "babeldoc";
+    events.length = 0;
+    assert.deepEqual(await Factory.translateSingleItem(item), { id: 2 });
+    assert.deepEqual(events, ["babeldoc-pdf", "import", "babeldoc-cleanup"]);
+    source = {
+      ...attachment,
+      attachmentFilename: "JEPA paper_hjfy_pdf_SOURCE01.pdf",
+    };
+    await assert.rejects(Factory.translateSingleItem(item), /原文 PDF 附件/);
+    fields.url = fields.url.replace("alphaxiv.org", "alphaxiv.org.example.com");
+    await assert.rejects(
+      Factory.translateSingleItem(item),
+      /未找到有效的 arXiv ID/,
+    );
+    assert.deepEqual(events, ["babeldoc-pdf", "import", "babeldoc-cleanup"]);
+  } finally {
+    DesktopTranslation.translatePdf = originalTranslatePdf;
+    PdfTranslation.translate = originalBabelTranslate;
+    PdfTranslation.cleanup = originalBabelCleanup;
+    DesktopTranslation.cleanup = originalCleanup;
     Factory.savePdfAsAttachment = originalSave;
   }
 });

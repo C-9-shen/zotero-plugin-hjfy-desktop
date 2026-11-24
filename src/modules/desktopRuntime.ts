@@ -121,29 +121,7 @@ export function decryptDesktopKey(encrypted: Uint8Array): string {
   }
 }
 
-export async function prepareDesktopTask(
-  arxivId: string,
-  job: string,
-  runtime: string,
-  update: (text: string) => void,
-) {
-  const installation = findDesktopInstallation();
-  const bundled = PathUtils.join(
-    installation,
-    "Engines",
-    "Office",
-    "hjfy-office.exe",
-  );
-  if (!(await IOUtils.exists(bundled)))
-    throw new Error("安装目录中没有 Engines/Office/hjfy-office.exe。");
-  const hash = await IOUtils.computeHexDigest(bundled, "sha256");
-  const engineDir = PathUtils.join(runtime, hash);
-  await IOUtils.makeDirectory(engineDir, { createAncestors: true });
-  const engine = PathUtils.join(engineDir, "hjfy-office.exe");
-  await enginePreparation.run(engine, async () => {
-    if (!(await IOUtils.exists(engine))) await IOUtils.copy(bundled, engine);
-  });
-
+async function loadDesktopModel() {
   const data =
     String(getPref("desktop.dataDirectory") || "").trim() ||
     PathUtils.join(
@@ -168,7 +146,7 @@ export async function prepareDesktopTask(
     !connection ||
     !["chat-completions", "responses"].includes(connection.Protocol)
   )
-    throw new Error("此模型协议不受 LaTeX 引擎支持。");
+    throw new Error("此模型协议不受当前桌面引擎接入支持。");
   let key = "local-no-key";
   if (connection.RequiresKey) {
     if (
@@ -180,6 +158,52 @@ export async function prepareDesktopTask(
       await IOUtils.read(PathUtils.join(data, `${profile.CredentialId}.key`)),
     );
   }
+  return {
+    name: profile.Name,
+    arguments: [
+      "--target-language",
+      "zh-Hans",
+      "--events=jsonl",
+      "--ui-language=zh-Hans",
+      "--provider",
+      connection.Protocol,
+      "--base-url",
+      connection.BaseUrl,
+      "--model",
+      connection.Model,
+      "--api-key-env",
+      "HJFY_PLUGIN_API_KEY",
+      "--concurrency",
+      "2",
+    ] as string[],
+    environment: { HJFY_PLUGIN_API_KEY: key },
+  };
+}
+
+export async function prepareDesktopTask(
+  arxivId: string,
+  job: string,
+  runtime: string,
+  update: (text: string) => void,
+) {
+  const installation = findDesktopInstallation();
+  const bundled = PathUtils.join(
+    installation,
+    "Engines",
+    "Office",
+    "hjfy-office.exe",
+  );
+  if (!(await IOUtils.exists(bundled)))
+    throw new Error("安装目录中没有 Engines/Office/hjfy-office.exe。");
+  const hash = await IOUtils.computeHexDigest(bundled, "sha256");
+  const engineDir = PathUtils.join(runtime, hash);
+  await IOUtils.makeDirectory(engineDir, { createAncestors: true });
+  const engine = PathUtils.join(engineDir, "hjfy-office.exe");
+  await enginePreparation.run(engine, async () => {
+    if (!(await IOUtils.exists(engine))) await IOUtils.copy(bundled, engine);
+  });
+
+  const model = await loadDesktopModel();
   update("正在下载 arXiv 源码…");
   const archive = PathUtils.join(job, "source.download");
   await Zotero.File.download(`https://arxiv.org/src/${arxivId}`, archive);
@@ -210,7 +234,7 @@ export async function prepareDesktopTask(
       await IOUtils.writeUTF8(target, prepared);
     else await IOUtils.write(target, entry.data);
   }
-  update(`正在使用 ${profile.Name} 翻译…`);
+  update(`正在使用 ${model.name} 翻译…`);
   return {
     command: engine,
     arguments: [
@@ -218,24 +242,58 @@ export async function prepareDesktopTask(
       source,
       "--latex-project-output-dir",
       PathUtils.join(job, "translated"),
-      "--target-language",
-      "zh-Hans",
-      "--events=jsonl",
-      "--ui-language=zh-Hans",
       "--translation-cache-db",
       PathUtils.join(runtime, "translations.sqlite3"),
-      "--provider",
-      connection.Protocol,
-      "--base-url",
-      connection.BaseUrl,
-      "--model",
-      connection.Model,
-      "--api-key-env",
-      "HJFY_PLUGIN_API_KEY",
-      "--concurrency",
-      "2",
+      ...model.arguments,
     ],
-    environment: { HJFY_PLUGIN_API_KEY: key },
+    environment: model.environment,
+    environmentAppend: true,
+    workdir: job,
+    stderr: "pipe",
+  };
+}
+
+export async function prepareDesktopPdfTask(
+  input: string,
+  job: string,
+  runtime: string,
+  update: (text: string) => void,
+) {
+  const bundled = PathUtils.join(findDesktopInstallation(), "Engines", "Pdf");
+  const executable = PathUtils.join(bundled, "bin", "hjfy-pdf.exe");
+  if (!(await IOUtils.exists(executable)))
+    throw new Error("安装目录中没有 Engines/Pdf/bin/hjfy-pdf.exe。");
+  const model = await loadDesktopModel();
+  const hash = await IOUtils.computeHexDigest(executable, "sha256");
+  const engineDir = PathUtils.join(runtime, `pdf-${hash}`);
+  const engine = PathUtils.join(engineDir, "bin", "hjfy-pdf.exe");
+  await enginePreparation.run(engine, async () => {
+    if (await IOUtils.exists(engine)) return;
+    update("正在准备桌面 PDF 引擎，首次使用需要复制本地运行资源…");
+    await IOUtils.makeDirectory(runtime, { createAncestors: true });
+    const staging = PathUtils.join(job, "pdf-engine");
+    // Windows Store executables and DLLs must run from the writable copy.
+    await IOUtils.copy(bundled, staging, { recursive: true });
+    await IOUtils.move(staging, engineDir, { noOverwrite: true });
+  });
+  const source = PathUtils.join(job, "source.pdf");
+  const outputPdf = PathUtils.join(job, "translated.pdf");
+  await IOUtils.copy(input, source);
+  update(`正在使用 ${model.name} 翻译 PDF…`);
+  return {
+    outputPdf,
+    command: engine,
+    arguments: [
+      source,
+      "--output",
+      outputPdf,
+      "--on-page-error",
+      "keep-original",
+      "--translation-cache-db",
+      PathUtils.join(runtime, "pdf-translations.sqlite3"),
+      ...model.arguments,
+    ],
+    environment: model.environment,
     environmentAppend: true,
     workdir: job,
     stderr: "pipe",

@@ -138,6 +138,19 @@ test("Chinese compilation setup precedes font loading, preserves content and ski
         "\\microtypesetup{protrusion=false,expansion=false,tracking=false}",
       ),
     );
+    assert.ok(
+      prepared.includes(String.raw`\@ifpackageloaded{times}`) &&
+        prepared.includes(
+          String.raw`\IfFileExists{tuptm.fd}{}{\DeclareFontFamilySubstitution{TU}{ptm}{lmr}}`,
+        ),
+    );
+    assert.ok(
+      prepared.indexOf(String.raw`\AddToHook{package/axessibility/before}`) <
+        prepared.indexOf(String.raw`\documentclass{article}`),
+    );
+    assert.ok(
+      prepared.includes(String.raw`\AddToHook{package/axessibility/after}`),
+    );
     assert.ok(prepared.includes("\\RequirePackage{xeCJKfntef}"));
     assert.ok(
       prepared.includes(
@@ -212,6 +225,29 @@ test("Tectonic preparation disables standalone pdfoutput assignments without alt
   assert.equal(
     prepareTectonicSource("\\pdfoutput=1text").source,
     "\\pdfoutput=1text",
+  );
+});
+
+test("XeTeX preparation skips pdfTeX glyph mapping and ligature commands", () => {
+  const source = String.raw`\input{glyphtounicode.tex} % keep this comment
+\pdfgentounicode=1
+\DisableLigatures[f]{family=sf*}
+\DisableLigatures{encoding=*,family=*}
+\input{another-file}
+\begin{verbatim}
+\input{glyphtounicode}
+\pdfgentounicode=1
+\DisableLigatures[f]{family=sf*}
+\end{verbatim}`;
+  const prepared = prepareTectonicSource(source);
+  assert.deepEqual(prepared.lines, [1, 2, 3, 4]);
+  assert.equal(prepared.source.length, source.length);
+  assert.equal(
+    prepared.source
+      .split("\n")
+      .map((line) => line.trim())
+      .join("\n"),
+    "% keep this comment\n\n\n\n" + source.split("\n").slice(4).join("\n"),
   );
 });
 
@@ -787,6 +823,149 @@ test("project discovery excludes commented roots and prevents path escape", () =
       ),
     /唯一/,
   );
+});
+
+test("captionof translates the caption without touching the float type, options or label", () => {
+  const source = String.raw`\begin{strip}
+\includegraphics{teaser.png}
+\captionof{figure}[Short title]{\textbf{Overview.} The result uses $x$ and \cite{key}.}
+\label{fig:teaser}
+\end{strip}`;
+  const { units } = planLatex(source, true);
+  assert.equal(units.length, 1);
+  assert.match(units[0].text, /Overview\./);
+  const output = applyLatexUnits(
+    source,
+    units,
+    units.map(({ text }) => translateProse(text)),
+  );
+  assert.ok(
+    output.includes(
+      String.raw`\captionof{figure}[Short title]{\textbf{中文译文}`,
+    ),
+  );
+  assert.ok(output.includes(String.raw`$x$`));
+  assert.ok(output.includes(String.raw`\cite{key}`));
+  assert.ok(output.includes(String.raw`\label{fig:teaser}`));
+  assert.doesNotMatch(output, /The result uses/);
+});
+
+test("a preamble abstract environment exposes its prose and restores preamble scanning", () => {
+  const source = String.raw`\documentclass{nvidiatechreport}
+\begin{abstract}
+Robot teammates share \textbf{observations} at $t$.
+
+Another abstract paragraph.
+\end{abstract}
+Preamble text stays untouched.
+\author{Author Name}
+\begin{document}
+The main text follows.
+\end{document}`;
+  const { units } = planLatex(source);
+  assert.equal(units.length, 3);
+  const output = applyLatexUnits(
+    source,
+    units,
+    units.map(({ text }) => translateProse(text)),
+  );
+  assert.ok(output.includes(String.raw`\textbf{中文译文}`));
+  assert.ok(output.includes(String.raw`$t$`));
+  assert.ok(
+    output.includes("\n\\end{abstract}\nPreamble text stays untouched.\n"),
+  );
+  assert.ok(output.includes(String.raw`\author{Author Name}`));
+  assert.doesNotMatch(
+    output,
+    /Robot teammates|Another abstract paragraph|The main text follows/,
+  );
+});
+
+test("a title-page teaser translates the optional caption and preserves its artwork and label", () => {
+  const source = String.raw`\documentclass{article}
+\teaser[\textbf{A heading with a bracket ] in braces.} The boat reaches $x$.
+\label{fig:teaser}]{\centering
+\includegraphics[width=.99\linewidth]{figures/teaser.pdf}}
+\begin{document}
+\maketitle
+\end{document}`;
+  const { units } = planLatex(source);
+  assert.equal(units.length, 1);
+  assert.match(units[0].text, /The boat reaches/);
+  const output = applyLatexUnits(
+    source,
+    units,
+    units.map(({ text }) => translateProse(text)),
+  );
+  assert.ok(output.includes(String.raw`\teaser[\textbf{中文译文`));
+  assert.ok(output.includes(String.raw`$x$`));
+  assert.equal(
+    output.slice(output.indexOf("\\label")),
+    source.slice(source.indexOf("\\label")),
+  );
+});
+
+test("pipeline translates an abstract loaded from a preamble input", async () => {
+  const abstract = String.raw`% \abstract{An older draft stays untouched.}
+\abstract{
+Frontier vision-language models help \methodname on $x_i$.
+}`;
+  const main = String.raw`\documentclass{article}
+\newcommand{\methodname}{ScaleVLA}
+\input{sec/0_abstract}
+\begin{document}
+\maketitle
+\end{document}`;
+  const files = new Map([
+    ["main.tex", main],
+    ["sec/0_abstract.tex", abstract],
+  ]);
+  const result = await translateLatexProject(
+    files,
+    { cacheKey: "fixture", translate: async (text) => translate(text) },
+    { read: async () => undefined, write: async () => {} },
+    hash,
+    () => {},
+    () => {},
+  );
+  assert.equal(result.requested, 1);
+  assert.equal(result.files.get("main.tex"), addChineseSupport(main));
+  const translated = result.files.get("sec/0_abstract.tex");
+  assert.match(
+    translated,
+    /^% \\abstract\{An older draft stays untouched\.\}\n\\abstract\{/,
+  );
+  assert.match(translated, /中文译文\s*\\methodname .*\$x_i\$/);
+  assert.doesNotMatch(translated, /Frontier vision-language models/);
+});
+
+test("the translation pipeline skips the pdfTeX glyph map but still requires paper inputs", async () => {
+  for (const glyphMap of ["glyphtounicode", "glyphtounicode.tex"]) {
+    const main = String.raw`\documentclass{article}
+\input{${glyphMap}}
+\begin{document}
+\input{section}
+\end{document}`;
+    const files = new Map([
+      ["main.tex", main],
+      ["section.tex", "Paper prose."],
+    ]);
+    const run = () =>
+      translateLatexProject(
+        files,
+        { cacheKey: "glyph-map", translate: async (text) => translate(text) },
+        { read: async () => undefined, write: async () => {} },
+        hash,
+        () => {},
+        () => {},
+      );
+    const result = await run();
+    assert.equal(result.requested, 1);
+    assert.match(result.files.get("section.tex"), /中文译文/);
+    assert.equal(result.files.get("main.tex"), addChineseSupport(main));
+    files.delete("section.tex");
+    await assert.rejects(run(), /main\.tex → section/);
+  }
 });
 
 test("pipeline translates reachable prose, retries invalid replies and reuses validated cache", async () => {

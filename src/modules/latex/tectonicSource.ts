@@ -1,16 +1,16 @@
 import { maskLatexExamples } from "./source";
 
-/** Tectonic emits XDV; a forced pdfoutput value can mislead driver detection. */
+/** Disable standalone pdfTeX-only commands in a XeTeX compilation copy. */
 export function prepareTectonicSource(source: string) {
   const clean = maskLatexExamples(source);
   const lines: number[] = [];
   let output = "";
   let end = 0;
   for (const match of clean.matchAll(
-    /^[\t ]*(?:\\global[\t ]*)?\\pdfoutput[\t ]*(?:=[\t ]*)?[+-]?\d+(?:[\t ]*\\relax)?(?=[\t ]*\r?$)/gm,
+    /^[\t ]*(?:(?:\\global[\t ]*)?\\(?:pdfoutput|pdfgentounicode)[\t ]*(?:=[\t ]*)?[+-]?\d+(?:[\t ]*\\relax)?|\\input[\t ]*\{glyphtounicode(?:\.tex)?\}|\\DisableLigatures[\t ]*(?:\[[^\r\n\]]*\][\t ]*)?\{[^{}\r\n]*\})(?=[\t ]*\r?$)/gm,
   )) {
     lines.push(source.slice(0, match.index).split("\n").length);
-    // Blank just the assignment. Keep comments, newlines and all other syntax.
+    // Blank just the command. Keep comments, newlines and all other syntax.
     output += source.slice(end, match.index) + " ".repeat(match[0].length);
     end = match.index + match[0].length;
   }

@@ -6,12 +6,40 @@ const FONT_OPTIONS = String.raw`% HJFY Chinese compilation compatibility
 \PassOptionsToPackage{no-math}{fontspec}
 `;
 
+// The accsupp option sets pdfTeX output parameters while loading. Ignore
+// those settings under XeTeX and keep the package's accessibility markup.
+const AXESSIBILITY_SUPPORT = String.raw`\ifdefined\XeTeXversion
+  \newcount\HjfyIgnoredPdfOption
+  \AddToHook{package/axessibility/before}{%
+    \let\HjfySavedCompressLevel\pdfcompresslevel
+    \let\HjfySavedMinorVersion\pdfoptionpdfminorversion
+    \let\HjfySavedGenToUnicode\pdfgentounicode
+    \let\HjfySavedGlyphToUnicode\pdfglyphtounicode
+    \let\pdfcompresslevel\HjfyIgnoredPdfOption
+    \let\pdfoptionpdfminorversion\HjfyIgnoredPdfOption
+    \let\pdfgentounicode\HjfyIgnoredPdfOption
+    \def\pdfglyphtounicode#1#2{}%
+  }%
+  \AddToHook{package/axessibility/after}{%
+    \let\pdfcompresslevel\HjfySavedCompressLevel
+    \let\pdfoptionpdfminorversion\HjfySavedMinorVersion
+    \let\pdfgentounicode\HjfySavedGenToUnicode
+    \let\pdfglyphtounicode\HjfySavedGlyphToUnicode
+  }%
+\fi
+`;
+
 // XeTeX's microtype backend cannot inspect Type 1 glyphs. soul's syllable
 // reconstruction also fails on translated CJK text; xeCJK's ulem integration
 // supplies breakable highlighting while retaining soul's selected color.
 const XETEX_SUPPORT = String.raw`
 \ifdefined\XeTeXversion
   \makeatletter
+  \@ifpackageloaded{times}{%
+    % The legacy ptm family has no TU shapes. Keep the Latin Modern fallback
+    % but select the matching weight and shape instead of always regular.
+    \IfFileExists{tuptm.fd}{}{\DeclareFontFamilySubstitution{TU}{ptm}{lmr}}%
+  }{}%
   \@ifpackageloaded{microtype}{%
     \microtypesetup{protrusion=false,expansion=false,tracking=false}%
   }{}
@@ -52,6 +80,7 @@ export function prepareChineseCompilation(source: string): string {
   return (
     source.slice(0, documentClass.index) +
     FONT_OPTIONS +
+    AXESSIBILITY_SUPPORT +
     source.slice(documentClass.index, document.index) +
     XETEX_SUPPORT +
     source.slice(document.index)

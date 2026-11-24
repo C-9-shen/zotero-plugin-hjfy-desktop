@@ -357,7 +357,7 @@ export class LightweightTranslation {
             );
             if (prepared.lines.length)
               log(
-                `[XeTeX 兼容] ${entry.path} 第 ${prepared.lines.join("、")} 行：禁用强制 pdfoutput 设置，使用 XeTeX 驱动自动检测。`,
+                `[XeTeX 兼容] ${entry.path} 第 ${prepared.lines.join("、")} 行：跳过仅适用于 pdfTeX 的指令。`,
               );
             const bibliography = bundledBibliography
               ? prepareBundledBibliography(prepared.source)

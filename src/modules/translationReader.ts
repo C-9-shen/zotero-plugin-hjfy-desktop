@@ -286,10 +286,33 @@ async function embedTranslation(
   );
 }
 
+export async function findOriginalPdf(
+  parent: Zotero.Item,
+  translationId?: number,
+) {
+  const preferred = await parent.getBestAttachment();
+  const candidates = [
+    ...(preferred ? [preferred] : []),
+    ...parent.getAttachments().map((id) => Zotero.Items.get(id)),
+  ];
+  for (const candidate of candidates) {
+    if (
+      candidate?.attachmentContentType === "application/pdf" &&
+      candidate.id !== translationId &&
+      !/_hjfy_(?:arxiv|pdf)_/i.test(candidate.attachmentFilename || "") &&
+      !String(candidate.getField("title")).startsWith("幻觉翻译 -") &&
+      (await candidate.fileExists())
+    ) {
+      return candidate;
+    }
+  }
+}
+
 /** Keep the native original reader and embed the translation in the same tab. */
 export async function openTranslationReaders(
   parent: Zotero.Item,
   translation: Zotero.Item,
+  original?: Zotero.Item,
 ): Promise<string> {
   const active = splitTabs.get(translation.id);
   if (active && !active.win.closed && !active.closed) {
@@ -297,25 +320,7 @@ export async function openTranslationReaders(
     await active.ready;
     return "已打开原文（左）与译文（右）分屏浏览。";
   }
-  const preferred = await parent.getBestAttachment();
-  const candidates = [
-    ...(preferred ? [preferred] : []),
-    ...parent.getAttachments().map((id) => Zotero.Items.get(id)),
-  ];
-  let original: Zotero.Item | undefined;
-  for (const candidate of candidates) {
-    if (
-      candidate &&
-      candidate.id !== translation.id &&
-      candidate.attachmentContentType === "application/pdf" &&
-      !/_hjfy_arxiv_/i.test(candidate.attachmentFilename || "") &&
-      !String(candidate.getField("title")).startsWith("幻觉翻译 -") &&
-      (await candidate.fileExists())
-    ) {
-      original = candidate;
-      break;
-    }
-  }
+  original ??= await findOriginalPdf(parent, translation.id);
   if (!original) {
     await Zotero.Reader.open(translation.id);
     return "已有译文已打开；未找到本地原文 PDF，无法分屏。";

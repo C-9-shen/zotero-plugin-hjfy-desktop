@@ -2,13 +2,24 @@ import { getString } from "../utils/locale";
 import { parseArxivId, parseArxivExtra } from "../utils/arxivId";
 import { DesktopTranslation } from "./desktopTranslation";
 import { LightweightTranslation } from "./lightweightTranslation";
+import { PdfTranslation } from "./pdfTranslation";
 import { getPref } from "../utils/prefs";
 import { TranslationProgressNote } from "./translationProgressNote";
-import { openTranslationReaders } from "./translationReader";
+import { findOriginalPdf, openTranslationReaders } from "./translationReader";
 import {
   openTranslationTaskList,
   runTranslationTask,
 } from "./translationTasks";
+
+type TranslationSource =
+  | { kind: "arxiv"; id: string }
+  | { kind: "pdf"; id: string; attachment: Zotero.Item };
+
+function isAlphaXivPaper(item: Zotero.Item): boolean {
+  return /^https?:\/\/(?:www\.)?alphaxiv\.org\/abs\/[\w.-]+\/?(?:[?#].*)?$/i.test(
+    String(item.getField("url") || "").trim(),
+  );
+}
 
 export class ArxivTranslationFactory {
   /**
@@ -23,8 +34,12 @@ export class ArxivTranslationFactory {
       commandListener: () => {
         const items = ztoolkit.getGlobal("ZoteroPane").getSelectedItems();
         if (items.length > 0) {
-          openTranslationTaskList();
-          this.translateSelectedItems(items);
+          let taskListOpened = false;
+          return this.translateSelectedItems(items, () => {
+            if (taskListOpened) return;
+            taskListOpened = true;
+            openTranslationTaskList();
+          });
         } else {
           new ztoolkit.ProgressWindow(getString("menuitem-label"))
             .createLine({
@@ -42,12 +57,15 @@ export class ArxivTranslationFactory {
   /**
    * 翻译选中的条目
    */
-  static async translateSelectedItems(items: Zotero.Item[]) {
+  static async translateSelectedItems(
+    items: Zotero.Item[],
+    onQueue?: () => void,
+  ) {
     await Promise.all(
       items.map(async (item) => {
         if (!addon.data.alive) return;
         try {
-          await this.translateSingleItem(item);
+          await this.translateSingleItem(item, undefined, onQueue);
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
@@ -60,9 +78,11 @@ export class ArxivTranslationFactory {
   static async translateSingleItem(
     item: Zotero.Item,
     update: (text: string) => void = () => {},
+    onQueue?: () => void,
   ) {
     const existing = await this.openExistingTranslation(item, update);
     if (existing) return existing;
+    onQueue?.();
     return runTranslationTask(
       item,
       (report) => this.translateItem(item, report),
@@ -75,9 +95,9 @@ export class ArxivTranslationFactory {
     update: (text: string) => void,
   ) {
     if (!item.isRegularItem()) throw new Error("请选择文献条目进行翻译。");
-    const arxivId = this.extractArxivIdFromItem(item);
+    const source = await this.getTranslationSource(item);
     // A queued item may have gained a translation while waiting.
-    const existing = await this.openExistingTranslation(item, update);
+    const existing = await this.openExistingTranslation(item, update, source);
     if (existing) return existing;
     const progress = await TranslationProgressNote.create(item);
     const report = (text: string) => {
@@ -85,19 +105,42 @@ export class ArxivTranslationFactory {
       update(text);
     };
     try {
-      if (!arxivId)
+      if (!source) {
+        if (isAlphaXivPaper(item))
+          throw new Error("请先下载或添加此 alphaXiv 条目的原文 PDF 附件。");
         throw new Error("未找到有效的 arXiv ID（需要 DOI、URL 或存档 ID）。");
-      report(`arXiv：${arxivId}`);
-      const backend =
-        getPref("translation.backend") === "lightweight"
-          ? LightweightTranslation
-          : DesktopTranslation;
-      const output = await backend.translate(arxivId, report, (text) =>
-        progress.log(text),
-      );
+      }
+      const log = (text: string) => progress.log(text);
+      let output: string;
+      let cleanup: (path: string) => Promise<void>;
+      if (source.kind === "pdf") {
+        const file = await source.attachment.getFilePathAsync();
+        if (!file) throw new Error("找不到本地原文 PDF，请重新下载附件。");
+        if (getPref("pdf.backend") === "babeldoc") {
+          output = await PdfTranslation.translate(file, report, log);
+          cleanup = (path) => PdfTranslation.cleanup(path);
+        } else {
+          report("使用幻觉翻译桌面端处理 alphaXiv 原文 PDF…");
+          output = await DesktopTranslation.translatePdf(file, report, log);
+          cleanup = (path) => DesktopTranslation.cleanup(path);
+        }
+      } else {
+        const backend =
+          getPref("translation.backend") === "lightweight"
+            ? LightweightTranslation
+            : DesktopTranslation;
+        report(`arXiv：${source.id}`);
+        output = await backend.translate(source.id, report, log);
+        cleanup = (path) => backend.cleanup(path);
+      }
       report("正在添加翻译附件…");
-      const attachment = await this.savePdfAsAttachment(item, output, arxivId);
-      await backend.cleanup(output);
+      const attachment = await this.savePdfAsAttachment(
+        item,
+        output,
+        source.id,
+        source.kind,
+      );
+      await cleanup(output);
       await progress.remove();
       report("翻译已完成，PDF 已添加到当前文献附件。");
       return attachment;
@@ -110,18 +153,37 @@ export class ArxivTranslationFactory {
     }
   }
 
+  private static async getTranslationSource(
+    item: Zotero.Item,
+  ): Promise<TranslationSource | null> {
+    const arxivId = this.extractArxivIdFromItem(item);
+    if (arxivId) return { kind: "arxiv", id: arxivId };
+    if (!isAlphaXivPaper(item)) return null;
+    const attachment = await findOriginalPdf(item);
+    return attachment ? { kind: "pdf", id: attachment.key, attachment } : null;
+  }
+
   private static async openExistingTranslation(
     item: Zotero.Item,
     update: (text: string) => void,
+    source?: TranslationSource | null,
   ) {
     if (!item.isRegularItem()) return null;
-    const arxivId = this.extractArxivIdFromItem(item);
-    if (!arxivId) return null;
+    if (source === undefined) source = await this.getTranslationSource(item);
+    if (!source) return null;
     const existing = await this.findExistingTranslationAttachment(
       item,
-      this.getTranslationAttachmentFilename(item, arxivId),
+      this.getTranslationAttachmentFilename(item, source.id, source.kind),
     );
-    if (existing) update(await openTranslationReaders(item, existing));
+    if (existing) {
+      update(
+        await openTranslationReaders(
+          item,
+          existing,
+          source.kind === "pdf" ? source.attachment : undefined,
+        ),
+      );
+    }
     return existing;
   }
 
@@ -195,9 +257,14 @@ export class ArxivTranslationFactory {
   static async savePdfAsAttachment(
     item: Zotero.Item,
     outputPath: string,
-    arxivId: string,
+    sourceId: string,
+    kind: TranslationSource["kind"] = "arxiv",
   ): Promise<Zotero.Item> {
-    const filename = this.getTranslationAttachmentFilename(item, arxivId);
+    const filename = this.getTranslationAttachmentFilename(
+      item,
+      sourceId,
+      kind,
+    );
     const copyPath = PathUtils.join(PathUtils.parent(outputPath)!, filename);
     await IOUtils.copy(outputPath, copyPath);
     try {
@@ -207,7 +274,7 @@ export class ArxivTranslationFactory {
       });
       attachment.setField(
         "title",
-        `幻觉翻译 - ${item.getDisplayTitle()} (${arxivId})`,
+        `幻觉翻译 - ${item.getDisplayTitle()} (${kind === "arxiv" ? sourceId : "PDF"})`,
       );
       await attachment.saveTx();
       return attachment;
@@ -221,13 +288,14 @@ export class ArxivTranslationFactory {
    */
   static getTranslationAttachmentFilename(
     item: Zotero.Item,
-    arxivId: string,
+    sourceId: string,
+    kind: TranslationSource["kind"] = "arxiv",
   ): string {
     const title = item
       .getDisplayTitle()
       .replace(/[^\w\s.-]/g, "")
       .substring(0, 50);
-    return `${title}_hjfy_arxiv_${arxivId.replace(/\//g, "_")}.pdf`;
+    return `${title}_hjfy_${kind}_${sourceId.replace(/\//g, "_")}.pdf`;
   }
 
   /**

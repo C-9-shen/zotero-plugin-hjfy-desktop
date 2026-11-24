@@ -1,4 +1,4 @@
-import { prepareDesktopTask } from "./desktopRuntime";
+import { prepareDesktopPdfTask, prepareDesktopTask } from "./desktopRuntime";
 import { parseArxivId } from "../utils/arxivId";
 
 interface DesktopEvent {
@@ -7,6 +7,7 @@ interface DesktopEvent {
   outcome?: string;
   output_pdf?: string;
   file?: string;
+  content?: { translated?: number };
   result?: {
     output_pdf?: string;
     translation?: {
@@ -32,6 +33,7 @@ export class DesktopTranslation {
   }
 
   private static prepareTask = prepareDesktopTask;
+  private static preparePdfTask = prepareDesktopPdfTask;
 
   private static async stop(process: any) {
     const { Subprocess } = ChromeUtils.importESModule(
@@ -58,10 +60,39 @@ export class DesktopTranslation {
     update: (text: string) => void,
     log: (text: string) => void = () => {},
   ): Promise<string> {
+    if (parseArxivId(arxivId) !== arxivId) throw new Error("无效的 arXiv ID。");
+    return this.run(
+      (job, runtime) => this.prepareTask(arxivId, job, runtime, update),
+      update,
+      log,
+    );
+  }
+
+  static async translatePdf(
+    input: string,
+    update: (text: string) => void,
+    log: (text: string) => void = () => {},
+  ): Promise<string> {
+    return this.run(
+      (job, runtime) => this.preparePdfTask(input, job, runtime, update),
+      update,
+      log,
+    );
+  }
+
+  private static async run(
+    prepare: (
+      job: string,
+      runtime: string,
+    ) => Promise<
+      Awaited<ReturnType<typeof prepareDesktopTask>> & { outputPdf?: string }
+    >,
+    update: (text: string) => void,
+    log: (text: string) => void,
+  ): Promise<string> {
     if (!Zotero.isWin) {
       throw new Error("桌面端接入目前仅支持 Windows。");
     }
-    if (parseArxivId(arxivId) !== arxivId) throw new Error("无效的 arXiv ID。");
     const generation = this.generation;
     const { Subprocess } = ChromeUtils.importESModule(
       "resource://gre/modules/Subprocess.sys.mjs",
@@ -74,11 +105,9 @@ export class DesktopTranslation {
     );
     await IOUtils.makeDirectory(job, { createAncestors: true });
     update(`诊断目录：${job}`);
-    const options = await this.prepareTask(
-      arxivId,
+    const { outputPdf, ...options } = await prepare(
       job,
       PathUtils.join(root, "runtime"),
-      update,
     );
     let process: any;
     try {
@@ -89,6 +118,7 @@ export class DesktopTranslation {
     }
     this.active.add(process);
     let terminal: DesktopEvent | undefined;
+    let pdfContent: DesktopEvent["content"];
     let bridgeError = "";
     let stderr = "";
     let exited = false;
@@ -97,12 +127,15 @@ export class DesktopTranslation {
       const event = JSON.parse(line) as DesktopEvent;
       if (event.type === "bridge_error") bridgeError = String(event.message);
       if (event.type === "run_finished") terminal = event;
+      if (outputPdf && event.type === "document_finished")
+        pdfContent = event.content;
       const text =
         typeof event.message === "string" ? event.message : event.message?.text;
       if (text) update(event.file ? `${text}（${event.file}）` : text);
     };
     try {
-      await process.stdin.close();
+      // The PDF engine uses stdin for cancellation and treats EOF as cancel.
+      if (!outputPdf) await process.stdin.close();
       const readEvents = async () => {
         let pending = "";
         while (true) {
@@ -155,7 +188,11 @@ export class DesktopTranslation {
           `部分文本翻译失败并回退为原文（${stats!.fallback_originals} 段），未导入不完整译文。诊断目录：${job}`,
         );
       }
-      const output = terminal.output_pdf || terminal.result?.output_pdf;
+      if (pdfContent?.translated === 0) {
+        throw new Error(`PDF 引擎未翻译任何内容。诊断目录：${job}`);
+      }
+      const output =
+        outputPdf || terminal.output_pdf || terminal.result?.output_pdf;
       if (
         !output ||
         !PathUtils.isAbsolute(output) ||
@@ -172,7 +209,11 @@ export class DesktopTranslation {
     } finally {
       this.active.delete(process);
       // Also terminate descendants if parsing failed or the plugin was shut down.
-      if (!exited) await this.stop(process);
+      try {
+        if (!exited) await this.stop(process);
+      } finally {
+        if (outputPdf) await process.stdin.close().catch(() => {});
+      }
     }
   }
 }

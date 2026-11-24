@@ -5,6 +5,7 @@ import {
   configureLightweightKey,
 } from "./modules/lightweightTranslation";
 import { closeTranslationReaders } from "./modules/translationReader";
+import { PdfTranslation } from "./modules/pdfTranslation";
 import {
   openTranslationTaskList,
   closeTranslationTaskList,
@@ -79,6 +80,7 @@ async function onShutdown(): Promise<void> {
   closeTranslationTaskList();
   await DesktopTranslation.cancelAll();
   await LightweightTranslation.cancelAll();
+  await PdfTranslation.cancelAll();
   ztoolkit.unregisterAll();
   // Remove addon object
   // @ts-expect-error - Plugin instance is not typed
